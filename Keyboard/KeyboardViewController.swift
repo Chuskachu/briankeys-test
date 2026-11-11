@@ -19,11 +19,44 @@ private class KeyButton: UIButton {
     var variants: [String] = []
     var isShiftKey = false
     var isDeleteKey = false
+    var isSpaceKey = false
     var haptic: Haptic = .lightKey
     var hitExpand: CGFloat = 0
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard hitExpand > 0 else { return super.point(inside: point, with: event) }
         return bounds.insetBy(dx: -hitExpand, dy: 0).contains(point)
+    }
+
+    // V1.6 slide-commit ("el arrastre escribe"). Brian's own diagnosis: at
+    // speed he drags his finger across keys without lifting, and every key
+    // after the first was silently lost. Now, when a touch drags well INTO
+    // another typing key, that key commits too — once per key per touch.
+    // Function keys (shift, delete, return, mode) are never slide targets:
+    // a glide must not delete or submit by accident.
+    static var slideTargets: [KeyButton] = []
+    var slideEnabled = false
+    var onSlideCommit: ((KeyButton) -> Void)?
+    private var slidCommitted: Set<ObjectIdentifier> = []
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        slidCommitted = [ObjectIdentifier(self)]
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        guard slideEnabled, let touch = touches.first, let handler = onSlideCommit else { return }
+        let p = touch.location(in: nil)   // window coordinates
+        for target in KeyButton.slideTargets {
+            let id = ObjectIdentifier(target)
+            if slidCommitted.contains(id) { continue }
+            // Must be well inside the target, not just grazing its edge.
+            let f = target.convert(target.bounds, to: nil).insetBy(dx: 6, dy: 5)
+            if f.contains(p) {
+                slidCommitted.insert(id)
+                handler(target)
+            }
+        }
     }
 }
 
@@ -55,6 +88,11 @@ class KeyboardViewController: UIInputViewController {
     /// The key whose character was just inserted on touch-down, so a
     /// long-press variant can replace it (delete + insert variant).
     private weak var pendingVariantKey: KeyButton?
+    /// All keys a finger may slide-commit into on the current page (V1.6).
+    private var slideKeys: [KeyButton] = []
+    /// When the last single space was typed, for double-space → ". " (V1.6).
+    private var lastSpaceAt: Date?
+    private var popupLabel: UILabel?
 
     // MARK: - Lifecycle
 
@@ -105,6 +143,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func buildKeyboard() {
         clearStack()
+        slideKeys = []
 
         // Variants strip (hidden until a long-press).
         variantStrip = UIStackView()
@@ -120,6 +159,7 @@ class KeyboardViewController: UIInputViewController {
         case .numbers: buildNumbers()
         case .symbols: buildSymbols()
         }
+        KeyButton.slideTargets = slideKeys
     }
 
     // Key colours with real separation in dark mode too (V1.2's keys
@@ -133,6 +173,34 @@ class KeyboardViewController: UIInputViewController {
         UIColor { t in t.userInterfaceStyle == .dark
             ? UIColor(red: 0.13, green: 0.13, blue: 0.15, alpha: 1)
             : .tertiarySystemBackground }
+    }
+    // Pressed-state colours (V1.6): keys visibly react the instant they are
+    // touched — part of "responde lento" was that nothing SEEMED to happen.
+    private var keyPressedColor: UIColor {
+        UIColor { t in t.userInterfaceStyle == .dark
+            ? UIColor(red: 0.38, green: 0.38, blue: 0.42, alpha: 1)
+            : .systemGray4 }
+    }
+    private var functionPressedColor: UIColor {
+        UIColor { t in t.userInterfaceStyle == .dark
+            ? UIColor(red: 0.26, green: 0.26, blue: 0.29, alpha: 1)
+            : .systemGray3 }
+    }
+
+    private func solidImage(_ color: UIColor) -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { ctx in
+            color.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+    }
+
+    /// Paint a key with 1x1 colour images so the .highlighted state can
+    /// differ — a plain backgroundColor cannot express "pressed".
+    private func paint(_ b: KeyButton, normal: UIColor, pressed: UIColor) {
+        b.setBackgroundImage(solidImage(normal), for: .normal)
+        b.setBackgroundImage(solidImage(pressed), for: .highlighted)
+        b.backgroundColor = nil
+        b.layer.masksToBounds = true
     }
 
     private func makeRow(_ keys: [KeyButton], equal: Bool = true) -> UIStackView {
@@ -153,7 +221,7 @@ class KeyboardViewController: UIInputViewController {
         b.setTitle(display, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 22, weight: .medium)
         b.setTitleColor(.label, for: .normal)
-        b.backgroundColor = keyColor
+        paint(b, normal: keyColor, pressed: keyPressedColor)
         b.layer.cornerRadius = 10
         b.variants = variants
         b.haptic = .lightKey
@@ -165,6 +233,10 @@ class KeyboardViewController: UIInputViewController {
         // keyboards commit on contact.
         b.addTarget(self, action: #selector(letterTouchedDown(_:)), for: .touchDown)
         b.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
+        // V1.6: this key can also be typed by dragging into it.
+        b.slideEnabled = true
+        b.onSlideCommit = { [weak self] target in self?.slideCommit(target) }
+        slideKeys.append(b)
         if !variants.isEmpty { addLongPress(to: b) }
         return b
     }
@@ -174,7 +246,7 @@ class KeyboardViewController: UIInputViewController {
         b.setTitle(title, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
         b.setTitleColor(.label, for: .normal)
-        b.backgroundColor = functionKeyColor
+        paint(b, normal: functionKeyColor, pressed: functionPressedColor)
         b.layer.cornerRadius = 10
         b.haptic = .select
         b.addTarget(self, action: action, for: .touchUpInside)
@@ -236,7 +308,7 @@ class KeyboardViewController: UIInputViewController {
         // Row 3: SHIFT | z x c v b n m | DELETE
         let shiftBtn = functionKey(shift == .off ? "⇧" : "⇪", action: #selector(shiftTapped(_:)))
         shiftBtn.isShiftKey = true
-        if shift != .off { shiftBtn.backgroundColor = .systemOrange }
+        if shift != .off { paint(shiftBtn, normal: .systemOrange, pressed: .systemOrange) }
         shiftButton = shiftBtn
         var row3: [KeyButton] = [shiftBtn]
         for ch in ["z","x","c","v","b","n","m"] {
@@ -291,9 +363,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func punctKey(_ char: String) -> KeyButton {
-        let b = letterKey(char)
-        b.backgroundColor = keyColor
-        return b
+        letterKey(char)   // letterKey already paints it as a typing key
     }
 
     // MARK: Bottom row (shared)
@@ -311,7 +381,9 @@ class KeyboardViewController: UIInputViewController {
         // bien". iOS draws its own globe in the chin below the keyboard,
         // so switching keyboards still works when HE wants it.
         let modeBtn = functionKey(modeTitle, action: modeAction)
-        modeBtn.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        // V1.6 (Brian): the 123 button was much too big — shrink it so the
+        // space bar can grow.
+        modeBtn.widthAnchor.constraint(equalToConstant: 38).isActive = true
         row.addArrangedSubview(modeBtn)
 
         let comma = punctKey(",")
@@ -324,12 +396,17 @@ class KeyboardViewController: UIInputViewController {
         space.setTitle("space", for: .normal)
         space.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
         space.setTitleColor(.label, for: .normal)
-        space.backgroundColor = keyColor
+        paint(space, normal: keyColor, pressed: keyPressedColor)
         space.layer.cornerRadius = 10
         space.haptic = .heavySpace
+        space.isSpaceKey = true
         space.hitExpand = 8   // space "steals" a few points from its neighbours' edges
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)   // V1.5: commit on contact, like the letters
         space.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
+        // V1.6: dragging into space also types a space.
+        space.slideEnabled = true
+        space.onSlideCommit = { [weak self] target in self?.slideCommit(target) }
+        slideKeys.append(space)
         row.addArrangedSubview(space)
 
         let period = punctKey(".")
@@ -347,10 +424,11 @@ class KeyboardViewController: UIInputViewController {
         ret.setTitle("⏎", for: .normal)
         ret.titleLabel?.font = .systemFont(ofSize: 20, weight: .medium)
         ret.setTitleColor(.label, for: .normal)
-        ret.backgroundColor = UIColor.systemTeal.withAlphaComponent(0.35)
+        paint(ret, normal: UIColor.systemTeal.withAlphaComponent(0.35),
+              pressed: UIColor.systemTeal.withAlphaComponent(0.6))
         ret.layer.cornerRadius = 10
         ret.haptic = .mediumReturn
-        ret.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        ret.widthAnchor.constraint(equalToConstant: 44).isActive = true   // V1.6: a touch narrower, space grows again
         ret.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
         ret.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
         row.addArrangedSubview(ret)
@@ -413,6 +491,7 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Actions
 
     private func insertTextSmart(_ text: String) {
+        lastSpaceAt = nil   // any real character breaks a double-space chain
         var out = text
         if text.count == 1, text.first!.isLetter {
             out = (shift == .off) ? text.lowercased() : text.uppercased()
@@ -433,17 +512,75 @@ class KeyboardViewController: UIInputViewController {
             b.setTitle(shift == .off ? base : base.uppercased(), for: .normal)
         }
         shiftButton?.setTitle(shift == .off ? "⇧" : "⇪", for: .normal)
-        shiftButton?.backgroundColor = shift == .off ? functionKeyColor : .systemOrange
+        if let sb = shiftButton {
+            if shift == .off { paint(sb, normal: functionKeyColor, pressed: functionPressedColor) }
+            else { paint(sb, normal: .systemOrange, pressed: .systemOrange) }
+        }
     }
 
     @objc private func letterTouchedDown(_ sender: KeyButton) {
         guard let label = sender.accessibilityLabel ?? sender.title(for: .normal) else { return }
         insertTextSmart(label)
         pendingVariantKey = sender   // a long-press variant may replace this char
+        showPopup(for: sender)
+    }
+
+    /// V1.6: a drag entered this key mid-touch — type it as if tapped.
+    private func slideCommit(_ target: KeyButton) {
+        guard variantStrip == nil || variantStrip.isHidden else { return }
+        keyTouchedDown(target)   // the target family's own haptic
+        if target.isSpaceKey {
+            spaceTapped()
+        } else if let label = target.accessibilityLabel ?? target.title(for: .normal) {
+            insertTextSmart(label)
+            pendingVariantKey = target
+            showPopup(for: target)
+        }
+    }
+
+    /// The classic key popup: the letter, enlarged, floating above the key.
+    /// Visual proof the key registered — feedback Brian's eyes can trust.
+    private func showPopup(for key: KeyButton) {
+        guard let text = key.title(for: .normal) ?? key.accessibilityLabel,
+              !text.isEmpty, text.count <= 2, key.window != nil else { return }
+        popupLabel?.removeFromSuperview()
+        let l = UILabel()
+        l.text = text
+        l.font = .systemFont(ofSize: 30, weight: .medium)
+        l.textAlignment = .center
+        l.backgroundColor = keyPressedColor
+        l.layer.cornerRadius = 8
+        l.layer.borderWidth = 0.5
+        l.layer.borderColor = UIColor.separator.cgColor
+        l.layer.masksToBounds = true
+        let kf = key.convert(key.bounds, to: view)
+        l.frame = CGRect(x: kf.midX - 23, y: kf.minY - 58, width: 46, height: 54)
+        view.addSubview(l)
+        popupLabel = l
+        UIView.animate(withDuration: 0.22, delay: 0.18, options: []) {
+            l.alpha = 0
+        } completion: { _ in
+            if self.popupLabel == l { self.popupLabel = nil }
+            l.removeFromSuperview()
+        }
     }
 
     @objc private func spaceTapped() {
+        let now = Date()
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        // V1.6 (Brian): double space → ". " — two quick spaces after a word
+        // become period + space, and auto-shift capitalises the next word.
+        if let last = lastSpaceAt, now.timeIntervalSince(last) < 0.4,
+           before.hasSuffix(" "), let prev = before.dropLast().last,
+           prev.isLetter || prev.isNumber {
+            textDocumentProxy.deleteBackward()
+            textDocumentProxy.insertText(". ")
+            lastSpaceAt = nil
+            autoShiftIfNeeded()
+            return
+        }
         textDocumentProxy.insertText(" ")
+        lastSpaceAt = now
         autoShiftIfNeeded()
     }
 

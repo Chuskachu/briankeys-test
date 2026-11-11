@@ -33,8 +33,26 @@ struct ContentView: View {
                     .font(.title3)
                     .bold()
 
-                Text("Escribe cada texto lo más rápido que puedas, aquí mismo con BrianKeys. NO corrijas los typos: los typos son los datos. Al final, «Copiar intento» y me lo pegas en el chat.")
+                Text("Escribe cada texto lo más rápido que puedas, aquí mismo con BrianKeys. NO corrijas los typos: los typos son los datos. Al final, «Copiar TODO» y me lo pegas en el chat de una sola vez.")
                     .font(.body)
+
+                HStack {
+                    Button("📋 Copiar TODO") {
+                        var parts = ["BrianKeys — resultados de la suite"]
+                        for i in testTexts.indices where !attempts[i].isEmpty {
+                            parts.append("\(i + 1). Meta: \(testTexts[i])\n   Intento: \(attempts[i])")
+                        }
+                        UIPasteboard.general.string = parts.joined(separator: "\n")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(attempts.allSatisfy { $0.isEmpty })
+
+                    Button("Borrar todo") {
+                        attempts = Array(repeating: "", count: testTexts.count)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(attempts.allSatisfy { $0.isEmpty })
+                }
 
                 ForEach(testTexts.indices, id: \.self) { i in
                     VStack(alignment: .leading, spacing: 8) {
