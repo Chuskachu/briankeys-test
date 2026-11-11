@@ -4,8 +4,11 @@ import UIKit
 ///
 /// Design rules, from Brian's pain-point map:
 /// - Big, clearly separated keys (54pt rows) for wide thumb contact patches.
-/// - Spanish QWERTY with its own Ñ key; accents and digits live on long-press
-///   (a big variants strip appears at the top — no tiny floating popups).
+/// - Spanish QWERTY; Ñ lives on long-press N (Brian's call — no Ñ key).
+///   Accents and digits also live on long-press (a big variants strip
+///   appears at the top — no tiny floating popups).
+/// - Haptic feedback on every key, with space feeling deliberately
+///   different — feeling the keys is the whole point of this project.
 /// - Return key is buffered: extra gap before it + its own colour, because
 ///   Brian kept hitting it when aiming for space or delete.
 /// - NO autocorrect, ever. The keyboard inserts exactly what he taps.
@@ -31,10 +34,19 @@ class KeyboardViewController: UIInputViewController {
     private var heightConstraint: NSLayoutConstraint!
     private var lastShiftTap: Date?
 
+    // Haptics — Brian's insight: this is our road to "feeling" the keys,
+    // the software echo of the BlackBerry's physical edges.
+    private let hapticLight = UIImpactFeedbackGenerator(style: .light)
+    private let hapticMedium = UIImpactFeedbackGenerator(style: .medium)
+    private let hapticSelect = UISelectionFeedbackGenerator()
+
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        hapticLight.prepare()
+        hapticMedium.prepare()
+        hapticSelect.prepare()
 
         heightConstraint = NSLayoutConstraint(item: view!, attribute: .height,
                                         relatedBy: .equal, toItem: nil,
@@ -155,10 +167,9 @@ class KeyboardViewController: UIInputViewController {
         mainStack.addArrangedSubview(makeRow(row1))
 
         var row2: [KeyButton] = []
-        for ch in ["a","s","d","f","g","h","j","k","l","ñ"] {
+        for ch in ["a","s","d","f","g","h","j","k","l"] {
             var v: [String] = []
             if ch == "a" { v = ["á"] }
-            if ch == "n" { v = ["ñ"] }
             row2.append(letterKey(ch, variants: v))
         }
         mainStack.addArrangedSubview(makeRow(row2))
@@ -168,7 +179,10 @@ class KeyboardViewController: UIInputViewController {
         shiftBtn.isShiftKey = true
         if shift != .off { shiftBtn.backgroundColor = .systemOrange }
         var row3: [KeyButton] = [shiftBtn]
-        for ch in ["z","x","c","v","b","n","m"] { row3.append(letterKey(ch)) }
+        for ch in ["z","x","c","v","b","n","m"] {
+            // Brian's call: no Ñ key — Ñ lives on long-press N instead.
+            row3.append(letterKey(ch, variants: ch == "n" ? ["ñ"] : []))
+        }
         let del = functionKey("⌫", action: #selector(deleteTapped))
         del.isDeleteKey = true
         addDeleteHold(to: del)
@@ -319,6 +333,7 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func variantTapped(_ sender: UIButton) {
         guard let s = sender.title(for: .normal) else { return }
+        hapticLight.impactOccurred()
         insertTextSmart(s)
         hideVariants()
     }
@@ -339,19 +354,23 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func letterTapped(_ sender: KeyButton) {
         guard let label = sender.accessibilityLabel ?? sender.title(for: .normal) else { return }
+        hapticLight.impactOccurred()
         insertTextSmart(label)
     }
 
     @objc private func spaceTapped() {
+        hapticMedium.impactOccurred()   // space feels different on purpose
         textDocumentProxy.insertText(" ")
         autoShiftIfNeeded()
     }
 
     @objc private func returnTapped() {
+        hapticSelect.selectionChanged()
         textDocumentProxy.insertText("\n")
     }
 
     @objc private func deleteTapped() {
+        hapticSelect.selectionChanged()
         textDocumentProxy.deleteBackward()
     }
 
@@ -377,6 +396,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func shiftTapped(_ sender: KeyButton) {
+        hapticSelect.selectionChanged()
         let now = Date()
         if let last = lastShiftTap, now.timeIntervalSince(last) < 0.35, shift == .once {
             shift = .locked          // double-tap while shifted = caps lock
@@ -391,9 +411,9 @@ class KeyboardViewController: UIInputViewController {
         buildKeyboard()
     }
 
-    @objc private func showNumbers() { mode = .numbers; buildKeyboard() }
-    @objc private func showSymbols() { mode = .symbols; buildKeyboard() }
-    @objc private func showLetters() { mode = .letters; buildKeyboard() }
+    @objc private func showNumbers() { hapticSelect.selectionChanged(); mode = .numbers; buildKeyboard() }
+    @objc private func showSymbols() { hapticSelect.selectionChanged(); mode = .symbols; buildKeyboard() }
+    @objc private func showLetters() { hapticSelect.selectionChanged(); mode = .letters; buildKeyboard() }
 
     // MARK: - Auto-shift (never autocorrect — capitals only)
 
