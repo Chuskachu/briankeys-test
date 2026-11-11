@@ -52,6 +52,9 @@ class KeyboardViewController: UIInputViewController {
     private let hapticSelect = UISelectionFeedbackGenerator()
     private var letterButtons: [KeyButton] = []
     private var shiftButton: KeyButton?
+    /// The key whose character was just inserted on touch-down, so a
+    /// long-press variant can replace it (delete + insert variant).
+    private weak var pendingVariantKey: KeyButton?
 
     // MARK: - Lifecycle
 
@@ -155,7 +158,12 @@ class KeyboardViewController: UIInputViewController {
         b.variants = variants
         b.haptic = .lightKey
         b.accessibilityLabel = char
-        b.addTarget(self, action: #selector(letterTapped(_:)), for: .touchUpInside)
+        // V1.5: letters register on touch DOWN, not touch-up. V1.4 test data
+        // showed the #1 error class was DROPPED letters (n, e, m, p, and l
+        // four times): at Brian's speed the thumb lands, slides a hair, and
+        // lifts outside the key, so touchUpInside never fired. Fast
+        // keyboards commit on contact.
+        b.addTarget(self, action: #selector(letterTouchedDown(_:)), for: .touchDown)
         b.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
         if !variants.isEmpty { addLongPress(to: b) }
         return b
@@ -217,6 +225,10 @@ class KeyboardViewController: UIInputViewController {
             var v: [String] = []
             if ch == "a" { v = ["á"] }
             let k = letterKey(ch, variants: v)
+            // L was dropped in 4 of 7 V1.4 test texts — it sits at the row's
+            // right edge where Brian's wide thumb makes partial contact.
+            // Give it a bigger invisible net (steals a slice from K's edge).
+            if ch == "l" { k.hitExpand = 6 }
             row2.append(k); letterButtons.append(k)
         }
         mainStack.addArrangedSubview(makeRow(row2))
@@ -237,10 +249,11 @@ class KeyboardViewController: UIInputViewController {
         del.haptic = .rigidDelete
         addDeleteHold(to: del)
         row3.append(del)
-        let row3Stack = makeRow(row3, equal: false)
-        shiftBtn.widthAnchor.constraint(equalTo: row3Stack.heightAnchor, multiplier: 1.0).isActive = true
-        del.widthAnchor.constraint(equalTo: row3Stack.heightAnchor, multiplier: 1.0).isActive = true
-        mainStack.addArrangedSubview(row3Stack)
+        // V1.5 (Brian's call): EVERY key in the row the same size — shift and
+        // delete become ordinary cells in a uniform grid, BlackBerry-style.
+        // This also kills the last .fill row, where Z silently ate the slack
+        // width and "looked weird" next to its neighbours.
+        mainStack.addArrangedSubview(makeRow(row3))
 
         mainStack.addArrangedSubview(bottomRow(modeTitle: "123", modeAction: #selector(showNumbers)))
     }
@@ -315,7 +328,7 @@ class KeyboardViewController: UIInputViewController {
         space.layer.cornerRadius = 10
         space.haptic = .heavySpace
         space.hitExpand = 8   // space "steals" a few points from its neighbours' edges
-        space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
+        space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)   // V1.5: commit on contact, like the letters
         space.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
         row.addArrangedSubview(space)
 
@@ -387,6 +400,12 @@ class KeyboardViewController: UIInputViewController {
     @objc private func variantTapped(_ sender: UIButton) {
         guard let s = sender.title(for: .normal) else { return }
         hapticLight.impactOccurred()
+        // The base character was already inserted on touch-down (V1.5);
+        // choosing a variant REPLACES it instead of adding a second char.
+        if pendingVariantKey != nil {
+            textDocumentProxy.deleteBackward()
+            pendingVariantKey = nil
+        }
         insertTextSmart(s)
         hideVariants()
     }
@@ -417,9 +436,10 @@ class KeyboardViewController: UIInputViewController {
         shiftButton?.backgroundColor = shift == .off ? functionKeyColor : .systemOrange
     }
 
-    @objc private func letterTapped(_ sender: KeyButton) {
+    @objc private func letterTouchedDown(_ sender: KeyButton) {
         guard let label = sender.accessibilityLabel ?? sender.title(for: .normal) else { return }
         insertTextSmart(label)
+        pendingVariantKey = sender   // a long-press variant may replace this char
     }
 
     @objc private func spaceTapped() {
