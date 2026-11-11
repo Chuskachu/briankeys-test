@@ -104,10 +104,12 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func makeRow(_ keys: [KeyButton]) -> UIStackView {
+    private func makeRow(_ keys: [KeyButton], equal: Bool = true) -> UIStackView {
         let row = UIStackView()
         row.axis = .horizontal
-        row.distribution = .fill
+        // .fillEqually for uniform key rows: with plain .fill the stack gives
+        // ALL spare width to the first key (V1.1 bug: giant Q and A keys).
+        row.distribution = equal ? .fillEqually : .fill
         row.spacing = 5
         row.heightAnchor.constraint(equalToConstant: 54).isActive = true
         for key in keys { row.addArrangedSubview(key) }
@@ -187,7 +189,7 @@ class KeyboardViewController: UIInputViewController {
         del.isDeleteKey = true
         addDeleteHold(to: del)
         row3.append(del)
-        let row3Stack = makeRow(row3)
+        let row3Stack = makeRow(row3, equal: false)
         shiftBtn.widthAnchor.constraint(equalTo: row3Stack.heightAnchor, multiplier: 1.35).isActive = true
         del.widthAnchor.constraint(equalTo: row3Stack.heightAnchor, multiplier: 1.35).isActive = true
         mainStack.addArrangedSubview(row3Stack)
