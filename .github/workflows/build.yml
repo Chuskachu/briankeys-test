@@ -4,6 +4,10 @@ on:
   push:
   workflow_dispatch:
 
+# The release step below needs write access to Contents.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -39,3 +43,12 @@ jobs:
         with:
           name: BrianKeysTest-unsigned-ipa
           path: BrianKeysTest-unsigned.ipa
+
+      # Also publish the .ipa as a Release asset: release files of a
+      # public repo can be downloaded without a token, which is how
+      # Muse fetches the build now that GitHub is connected via OAuth
+      # (the connector has no Actions-artifact access).
+      - name: Publish the .ipa as a release asset
+        run: gh release create "build-${{ github.run_number }}" BrianKeysTest-unsigned.ipa --title "Build ${{ github.run_number }}" --notes "Automated unsigned build — install via SideStore."
+        env:
+          GH_TOKEN: ${{ github.token }}

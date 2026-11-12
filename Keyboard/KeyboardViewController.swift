@@ -7,13 +7,13 @@ import UIKit
 /// - Spanish QWERTY; Ñ lives on long-press N (Brian's call — no Ñ key).
 ///   Accents and digits also live on long-press (a big variants strip
 ///   appears at the top — no tiny floating popups).
-/// - Haptics are our road to "feeling" the keys (Brian's insight): the
-///   software echo of the BlackBerry's physical edges. V1.7: families are
-///   distinguished by PATTERN, not intensity — V1.6's light@0.6 letters
-///   were indistinguishable from everything else; only heavy space stood
-///   out. Letters = one firm medium pulse, space = heavy DOUBLE pulse,
-///   delete = rigid, return = heavy single. Generators re-prepare after
-///   every fire so the pulse lands WITH the touch, not after it.
+/// - Haptics were our road to "feeling" the keys (Brian's insight), but
+///   v0.2 REMOVES them from every key except the space bar (Brian's
+///   call): a pulse lands AFTER the touch, and at his speed the brain
+///   reads that delay as a slow keyboard. Space keeps its heavy DOUBLE
+///   pulse — the one key he always felt, and the one that matters.
+/// - Version scheme (Brian, 2026-11-12): v0.2, v0.3, v0.4… —
+///   "para números enteros no estamos".
 /// - Return key is buffered: a dead gap before it + its own colour,
 ///   because Brian kept hitting it when aiming for space or delete.
 /// - NO autocorrect, ever. The keyboard inserts exactly what he taps;
@@ -49,6 +49,8 @@ private class KeyButton: UIButton {
     // Function keys are never slide targets: a glide must not delete or
     // submit by accident.
     static var slideTargets: [KeyButton] = []
+    /// v0.2: window frames cached at layout time (see touchesMoved).
+    static var frameCache: [ObjectIdentifier: CGRect] = [:]
     var slideEnabled = false
     var onSlideCommit: ((KeyButton, CGPoint) -> Void)?
     private var slidCommitted: Set<ObjectIdentifier> = []
@@ -72,7 +74,9 @@ private class KeyButton: UIButton {
             let id = ObjectIdentifier(target)
             if slidCommitted.contains(id) { continue }
             // Must be well inside the target, not just grazing its edge.
-            let f = target.convert(target.bounds, to: nil).insetBy(dx: 6, dy: 5)
+            // v0.2: frame from the layout cache, not a fresh conversion
+            // of every target on every move event.
+            let f = (KeyButton.frameCache[id] ?? target.convert(target.bounds, to: nil)).insetBy(dx: 6, dy: 5)
             if f.contains(p) {
                 slidCommitted.insert(id)
                 handler(target, p)
@@ -91,16 +95,16 @@ class KeyboardViewController: UIInputViewController {
 
     private var mainStack: UIStackView!
     private var variantStrip: UIStackView!
+    /// Second strip, only used by the log panel (v0.2 speed toggles).
+    private var panelStrip: UIStackView!
     private var deleteTimer: Timer?
     private var heightConstraint: NSLayoutConstraint!
     private var lastShiftTap: Date?
 
-    // Haptics — see the header. Pattern over intensity (V1.7).
-    private let hapticLight = UIImpactFeedbackGenerator(style: .light)
-    private let hapticMedium = UIImpactFeedbackGenerator(style: .medium)
+    // Haptics — v0.2: ONLY the space bar has one (heavy double pulse).
+    // Every other generator is gone (Brian: the pulse arrives after the
+    // touch and the brain reads that delay as a slow keyboard).
     private let hapticHeavy = UIImpactFeedbackGenerator(style: .heavy)
-    private let hapticRigid = UIImpactFeedbackGenerator(style: .rigid)
-    private let hapticSelect = UISelectionFeedbackGenerator()
     private var letterButtons: [KeyButton] = []
     private var shiftButton: KeyButton?
     /// The key whose character was just inserted on touch-down, so a
@@ -116,6 +120,13 @@ class KeyboardViewController: UIInputViewController {
     /// V1.7 proximity rescue: touches that began in a dead gap, tracked
     /// per touch with the keys they have already committed.
     private var rescuedTouches: [ObjectIdentifier: Set<ObjectIdentifier>] = [:]
+
+    /// v0.2 speed diet: the current word, tracked LOCALLY from our own
+    /// inserts and deletes. Reading textDocumentProxy on every keystroke
+    /// is a round-trip to the host app; the mirror takes it off the
+    /// letter path. textDidChange resyncs it when a change comes from
+    /// outside (field switch, cursor move, host-app edits).
+    private var localWord: String = ""
 
     // MARK: - Suggestion bar (V1.7 — Phase 2, pulled forward by Brian)
     //
@@ -141,6 +152,8 @@ class KeyboardViewController: UIInputViewController {
     private lazy var learned: [String: Int] = {
         UserDefaults.standard.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
     }()
+    /// Accent-folded forms of the learned words, cached (v0.2 diet).
+    private var learnedFolded: [String: String] = [:]
 
     // MARK: - Corrección prudente (V1.8 — Brian's choice, 2026-11-12)
     //
@@ -171,11 +184,11 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        hapticLight.prepare()
-        hapticMedium.prepare()
         hapticHeavy.prepare()
-        hapticRigid.prepare()
-        hapticSelect.prepare()
+        // Seed the folded-form cache for learned words (v0.2 diet:
+        // computeSuggestions used to re-fold every learned word on
+        // every single keystroke).
+        learnedFolded = Dictionary(uniqueKeysWithValues: learned.keys.map { ($0, fold($0)) })
 
         // V1.9 touch logger: observe every key's physical touch-down.
         KeyButton.onAnyTouchDown = { [weak self] key, wpt in
@@ -227,7 +240,29 @@ class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         autoShiftIfNeeded()
-        updateSuggestions()
+        // If the proxy's word disagrees with our mirror, the change came
+        // from outside: adopt it and refresh the bar. When they agree,
+        // our own action handler already updated it — this is what keeps
+        // suggestions at ONE compute per keystroke (v0.2 diet).
+        let proxyWord = currentWord()
+        if proxyWord != localWord {
+            localWord = proxyWord
+            updateSuggestions()
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        flushLog()   // v0.2: don't strand buffered log events
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // v0.2: cache the slide/rescue key frames at layout time instead
+        // of converting ~30 frames on every touchesMoved event.
+        for key in slideKeys where key.window != nil {
+            KeyButton.frameCache[ObjectIdentifier(key)] = key.convert(key.bounds, to: nil)
+        }
     }
 
     // MARK: - Keyboard construction
@@ -253,6 +288,15 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.isHidden = true
         variantStrip.heightAnchor.constraint(equalToConstant: 46).isActive = true
         mainStack.addArrangedSubview(variantStrip)
+
+        // Second strip (hidden unless the log panel is open, v0.2).
+        panelStrip = UIStackView()
+        panelStrip.axis = .horizontal
+        panelStrip.distribution = .fillEqually
+        panelStrip.spacing = 5
+        panelStrip.isHidden = true
+        panelStrip.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        mainStack.addArrangedSubview(panelStrip)
 
         switch mode {
         case .letters: buildLetters()
@@ -366,32 +410,16 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func keyTouchedDown(_ sender: KeyButton) {
-        // V1.7 haptics by PATTERN (see header). Every fire re-prepares its
-        // generator: an unprepared generator answers late, and a late
-        // pulse reads as a slow keyboard even when the letter landed.
-        switch sender.haptic {
-        case .lightKey:   // letters & punctuation: one clear pulse
-            // V1.8: V1.7's full-strength 1.0 felt TOO strong (Brian) —
-            // the pattern was right, the volume was not.
-            hapticMedium.impactOccurred(intensity: 0.65)
-            hapticMedium.prepare()
-        case .heavySpace: // space: heavy DOUBLE pulse — unmistakable
-            hapticHeavy.impactOccurred(intensity: 0.85)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
-                self?.hapticHeavy.impactOccurred(intensity: 0.55)
-                self?.hapticHeavy.prepare()
-            }
-            hapticHeavy.prepare()
-        case .rigidDelete:
-            hapticRigid.impactOccurred(intensity: 0.75)
-            hapticRigid.prepare()
-        case .mediumReturn:
-            hapticHeavy.impactOccurred(intensity: 0.85)
-            hapticHeavy.prepare()
-        case .select:
-            hapticSelect.selectionChanged()
-            hapticSelect.prepare()
+        // v0.2: haptics ONLY on the space bar — a heavy double pulse.
+        // All other keys are silent: at Brian's speed the pulse lands
+        // after the letter and reads as lag, not as feel.
+        guard sender.haptic == .heavySpace else { return }
+        hapticHeavy.impactOccurred(intensity: 0.85)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            self?.hapticHeavy.impactOccurred(intensity: 0.55)
+            self?.hapticHeavy.prepare()
         }
+        hapticHeavy.prepare()
     }
 
     private func addLongPress(to button: KeyButton) {
@@ -601,24 +629,25 @@ class KeyboardViewController: UIInputViewController {
         close.layer.cornerRadius = 8
         close.addTarget(self, action: #selector(hideVariants), for: .touchUpInside)
         variantStrip.addArrangedSubview(close)
+        panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = 368
     }
 
     @objc private func hideVariants() {
         variantStrip.isHidden = true
+        panelStrip?.isHidden = true
         heightConstraint.constant = 315
     }
 
     @objc private func variantTapped(_ sender: UIButton) {
         guard let s = sender.title(for: .normal) else { return }
-        hapticMedium.impactOccurred(intensity: 1.0)
-        hapticMedium.prepare()
         // The base character was already inserted on touch-down (V1.5);
         // choosing a variant REPLACES it instead of adding a second char.
         if pendingVariantKey != nil {
             textDocumentProxy.deleteBackward()
             pendingVariantKey = nil
+            if !localWord.isEmpty { localWord.removeLast() }
         }
         insertTextSmart(s)
         hideVariants()
@@ -641,9 +670,11 @@ class KeyboardViewController: UIInputViewController {
     private func learn(_ w: String) {
         guard w.count >= 2 else { return }
         learned[w, default: 0] += 1
+        learnedFolded[w] = fold(w)
         if learned.count > 800 {   // keep the store lean: top 400 survive
             learned = Dictionary(uniqueKeysWithValues:
                 learned.sorted { $0.value > $1.value }.prefix(400).map { ($0.key, $0.value) })
+            learnedFolded = Dictionary(uniqueKeysWithValues: learned.keys.map { ($0, fold($0)) })
         }
         UserDefaults.standard.set(learned, forKey: learnedKey)
     }
@@ -653,18 +684,14 @@ class KeyboardViewController: UIInputViewController {
     /// a corrected word reinforces its correction, and the raw typo is
     /// never learned.
     private func completeWord() {
-        let w = currentWord()
+        let w = localWord
         guard w.count >= 2 else { return }
         var final = w
         if prudentEnabled, let fixed = prudentFix(for: w) {
             replaceCurrentWord(with: fixed)
             final = fixed
-            // The corrector's signature: two soft ticks — "I acted".
-            hapticLight.impactOccurred(intensity: 0.7)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-                self?.hapticLight.impactOccurred(intensity: 0.7)
-                self?.hapticLight.prepare()
-            }
+            // (v0.2: the corrector's old double-tick haptic is gone —
+            // haptics are space-only now. The corrector is parked anyway.)
         }
         learn(final)
     }
@@ -736,9 +763,9 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func replaceCurrentWord(with fixed: String) {
-        let w = currentWord()
-        for _ in w { textDocumentProxy.deleteBackward() }
+        for _ in localWord { textDocumentProxy.deleteBackward() }
         textDocumentProxy.insertText(fixed)
+        localWord = fixed
     }
 
     /// Long-press on space: the prudent corrector's switch + a flash in
@@ -747,7 +774,6 @@ class KeyboardViewController: UIInputViewController {
         guard gesture.state == .began else { return }
         prudentEnabled.toggle()
         UserDefaults.standard.set(prudentEnabled, forKey: prudentKey)
-        hapticSelect.selectionChanged()
         chips[0].setTitle("Corrección prudente", for: .normal)
         chips[1].setTitle(prudentEnabled ? "ACTIVADA ✓" : "apagada", for: .normal)
         chips[2].setTitle("", for: .normal)
@@ -779,7 +805,7 @@ class KeyboardViewController: UIInputViewController {
             if out.count == 3 { return out }
         }
         let learnedMatches = learned
-            .filter { fold($0.key).hasPrefix(fp) }
+            .filter { (learnedFolded[$0.key] ?? fold($0.key)).hasPrefix(fp) }
             .sorted { $0.value > $1.value }
         for m in learnedMatches {
             offer(m.key)
@@ -798,7 +824,16 @@ class KeyboardViewController: UIInputViewController {
 
     private func updateSuggestions() {
         guard suggestionBar != nil else { return }
-        currentSuggestions = computeSuggestions(for: currentWord())
+        guard suggEnabled else {
+            currentSuggestions = []
+            for chip in chips {
+                chip.setTitle("", for: .normal)
+                chip.isEnabled = false
+                chip.alpha = 0.35
+            }
+            return
+        }
+        currentSuggestions = computeSuggestions(for: localWord)
         for (i, chip) in chips.enumerated() {
             if i < currentSuggestions.count {
                 chip.setTitle(currentSuggestions[i], for: .normal)
@@ -816,8 +851,8 @@ class KeyboardViewController: UIInputViewController {
         let i = sender.tag
         guard i < currentSuggestions.count else { return }
         var word = currentSuggestions[i]
-        let partial = currentWord()
-        for _ in partial { textDocumentProxy.deleteBackward() }
+        for _ in localWord { textDocumentProxy.deleteBackward() }
+        localWord = ""
         if shift != .off {
             word = word.prefix(1).uppercased() + word.dropFirst()
             if shift == .once { shift = .off; applyShiftVisuals() }
@@ -846,6 +881,12 @@ class KeyboardViewController: UIInputViewController {
 
     private let logOnKey = "bk_log_on_v1"
     private lazy var logEnabled: Bool = UserDefaults.standard.bool(forKey: logOnKey)
+    // v0.2 Speed Lab toggles (log panel, strip 2). Both default ON;
+    // Brian flips them to isolate what each feature costs at speed.
+    private let popupKey = "bk_popup_v1"
+    private let suggKey = "bk_sugg_v1"
+    private lazy var popupEnabled: Bool = UserDefaults.standard.object(forKey: popupKey) as? Bool ?? true
+    private lazy var suggEnabled: Bool = UserDefaults.standard.object(forKey: suggKey) as? Bool ?? true
     private var logHandle: FileHandle?
     private var logOpened = false
     private var logCount = 0
@@ -879,7 +920,12 @@ class KeyboardViewController: UIInputViewController {
         appendLogLine(line)
     }
 
-    private func appendLogLine(_ line: String) {
+    /// v0.2: events buffer in MEMORY and flush in batches of 40 — the
+    /// old code wrote every single touch to disk synchronously, on the
+    /// main thread, while recording (i.e. during every measured test).
+    private var logBuffer: [String] = []
+
+    private func ensureLogCount() {
         if !logOpened {
             logOpened = true
             if !FileManager.default.fileExists(atPath: logURL.path) {
@@ -888,17 +934,30 @@ class KeyboardViewController: UIInputViewController {
             } else if let data = try? Data(contentsOf: logURL) {
                 logCount = data.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
             }
+        }
+    }
+
+    private func appendLogLine(_ line: String) {
+        ensureLogCount()
+        logBuffer.append(line)
+        logCount += 1
+        if logBuffer.count >= 40 { flushLog() }
+        if logCount > 5000 { trimLog() }
+    }
+
+    private func flushLog() {
+        guard !logBuffer.isEmpty else { return }
+        if logHandle == nil {
             logHandle = try? FileHandle(forWritingTo: logURL)
             _ = try? logHandle?.seekToEnd()
         }
-        guard let h = logHandle, let d = line.data(using: .utf8) else { return }
-        h.write(d)
-        logCount += 1
-        if logCount > 5000 { trimLog() }
+        if let h = logHandle, let d = logBuffer.joined().data(using: .utf8) { h.write(d) }
+        logBuffer.removeAll()
     }
 
     /// Keep the newest 4,000 events when the cap is crossed.
     private func trimLog() {
+        flushLog()
         try? logHandle?.close()
         logHandle = nil
         if let text = try? String(contentsOf: logURL, encoding: .utf8) {
@@ -920,7 +979,6 @@ class KeyboardViewController: UIInputViewController {
     @objc private func logPanelPressed(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
         logPanelJustOpened = true
-        hapticSelect.selectionChanged()
         showLogPanel()
     }
 
@@ -936,6 +994,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func showLogPanel() {
+        ensureLogCount()
         for arranged in variantStrip.arrangedSubviews {
             variantStrip.removeArrangedSubview(arranged)
             arranged.removeFromSuperview()
@@ -952,18 +1011,50 @@ class KeyboardViewController: UIInputViewController {
         close.layer.cornerRadius = 8
         close.addTarget(self, action: #selector(hideVariants), for: .touchUpInside)
         variantStrip.addArrangedSubview(close)
+
+        // Strip 2 (v0.2 Speed Lab): popup + suggestions toggles and the
+        // version tag. Toggling writes a CFG marker into the log (when
+        // recording) so one suite run stays segmented by configuration.
+        for arranged in panelStrip.arrangedSubviews {
+            panelStrip.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        panelStrip.addArrangedSubview(stripButton(
+            popupEnabled ? "👁 Popup: SÍ" : "👁 Popup: NO", #selector(popupToggleTapped)))
+        panelStrip.addArrangedSubview(stripButton(
+            suggEnabled ? "💡 Sugerencias: SÍ" : "💡 Sugerencias: NO", #selector(suggToggleTapped)))
+        let ver = stripButton("BrianKeys v0.2", #selector(popupToggleTapped))
+        ver.isEnabled = false
+        panelStrip.addArrangedSubview(ver)
+        panelStrip.isHidden = false
         variantStrip.isHidden = false
-        heightConstraint.constant = 368
+        heightConstraint.constant = 421
+    }
+
+    @objc private func popupToggleTapped() {
+        popupEnabled.toggle()
+        UserDefaults.standard.set(popupEnabled, forKey: popupKey)
+        if !popupEnabled { hidePopup() }
+        if logEnabled { logEvent(k: "CFG", m: popupEnabled ? "popup-on" : "popup-off", viewPoint: .zero, frame: nil) }
+        showLogPanel()
+    }
+
+    @objc private func suggToggleTapped() {
+        suggEnabled.toggle()
+        UserDefaults.standard.set(suggEnabled, forKey: suggKey)
+        if logEnabled { logEvent(k: "CFG", m: suggEnabled ? "sugg-on" : "sugg-off", viewPoint: .zero, frame: nil) }
+        updateSuggestions()
+        showLogPanel()
     }
 
     @objc private func logToggleTapped() {
         logEnabled.toggle()
         UserDefaults.standard.set(logEnabled, forKey: logOnKey)
-        hapticSelect.selectionChanged()
         showLogPanel()   // rebuild so the state and count are current
     }
 
     @objc private func logCopyTapped() {
+        flushLog()
         try? logHandle?.synchronize()
         let text = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
         hideVariants()
@@ -979,6 +1070,7 @@ class KeyboardViewController: UIInputViewController {
         try? logHandle?.close()
         logHandle = nil
         logOpened = false
+        logBuffer.removeAll()
         logCount = 0
         try? "".write(to: logURL, atomically: true, encoding: .utf8)
         hideVariants()
@@ -1062,7 +1154,7 @@ class KeyboardViewController: UIInputViewController {
         var best: KeyButton?
         var bestDist = CGFloat.greatestFiniteMagnitude
         for key in slideKeys where key.window != nil {
-            let f = key.convert(key.bounds, to: nil)
+            let f = KeyButton.frameCache[ObjectIdentifier(key)] ?? key.convert(key.bounds, to: nil)
             if strict {
                 if f.insetBy(dx: 6, dy: 5).contains(p) { return key }
             } else if f.insetBy(dx: -5, dy: -3).contains(p) {
@@ -1072,7 +1164,7 @@ class KeyboardViewController: UIInputViewController {
         }
         if strict || best != nil { return best }
         for key in slideKeys where key.window != nil {
-            let f = key.convert(key.bounds, to: nil)
+            let f = KeyButton.frameCache[ObjectIdentifier(key)] ?? key.convert(key.bounds, to: nil)
             let d = hypot(f.midX - p.x, f.midY - p.y)
             if d < bestDist { bestDist = d; best = key }
         }
@@ -1084,6 +1176,7 @@ class KeyboardViewController: UIInputViewController {
     private func insertTextSmart(_ text: String) {
         if text.count == 1, let c = text.first, !c.isLetter, c != " " {
             completeWord()   // a punctuation mark completes a word
+            localWord = ""
         }
         lastSpaceAt = nil   // any real character breaks a double-space chain
         var out = text
@@ -1091,6 +1184,7 @@ class KeyboardViewController: UIInputViewController {
             out = (shift == .off) ? text.lowercased() : text.uppercased()
         }
         textDocumentProxy.insertText(out)
+        if out.count == 1, let oc = out.first, oc.isLetter { localWord.append(oc) }
         if shift == .once, text.count == 1, text.first!.isLetter {
             shift = .off
             applyShiftVisuals()   // update in place — never rebuild mid-typing
@@ -1143,7 +1237,8 @@ class KeyboardViewController: UIInputViewController {
     /// proof the key registered. V1.7 diet: ONE reused label, no fade
     /// animation (an animation per keystroke was pure main-thread cost).
     private func showPopup(for key: KeyButton) {
-        guard let text = key.title(for: .normal) ?? key.accessibilityLabel,
+        guard popupEnabled,
+              let text = key.title(for: .normal) ?? key.accessibilityLabel,
               !text.isEmpty, text.count <= 2, key.window != nil else { return }
         let l: UILabel
         if let existing = popupLabel {
@@ -1176,6 +1271,7 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func spaceTapped() {
         completeWord()   // the word before this space is complete
+        localWord = ""
         let now = Date()
         let before = textDocumentProxy.documentContextBeforeInput ?? ""
         // Double space → ". " (Brian, V1.6): two quick spaces after a word
@@ -1200,12 +1296,14 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func returnTapped() {
         completeWord()
+        localWord = ""
         textDocumentProxy.insertText("\n")
         updateSuggestions()
     }
 
     @objc private func deleteTapped() {
         textDocumentProxy.deleteBackward()
+        if !localWord.isEmpty { localWord.removeLast() }
         updateSuggestions()
     }
 
@@ -1220,8 +1318,10 @@ class KeyboardViewController: UIInputViewController {
         case .began:
             deleteTimer?.invalidate()
             deleteTimer = Timer.scheduledTimer(withTimeInterval: 0.065, repeats: true) { [weak self] _ in
-                self?.textDocumentProxy.deleteBackward()
-                self?.updateSuggestions()
+                guard let self else { return }
+                self.textDocumentProxy.deleteBackward()
+                if !self.localWord.isEmpty { self.localWord.removeLast() }
+                self.updateSuggestions()
             }
         case .ended, .cancelled, .failed:
             deleteTimer?.invalidate()
