@@ -110,6 +110,10 @@ class KeyboardViewController: UIInputViewController {
     /// The key whose character was just inserted on touch-down, so a
     /// long-press variant can replace it (delete + insert variant).
     private weak var pendingVariantKey: KeyButton?
+    /// v0.4: the exact character the pending key inserted. variantTapped
+    /// deletes ONLY if the document's last char still equals it — the
+    /// defensive fix for the "á eats the previous letter" bug.
+    private var pendingBaseChar: String? = nil
     /// All keys a finger may slide-commit into on the current page.
     /// Exactly the typing keys — function keys are never in this list,
     /// which is also what makes the proximity rescue safe.
@@ -205,7 +209,13 @@ class KeyboardViewController: UIInputViewController {
         mainStack = UIStackView()
         mainStack.axis = .vertical
         mainStack.distribution = .fill
-        mainStack.spacing = 7
+        mainStack.spacing = 0   // v0.4: ZERO gaps between key rows (Brian's idea)
+        // The tray shows through the rounded corners of the touching keys.
+        view.backgroundColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 1)
+                : UIColor(red: 0.82, green: 0.83, blue: 0.86, alpha: 1)
+        }
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(mainStack)
         NSLayoutConstraint.activate([
@@ -277,6 +287,14 @@ class KeyboardViewController: UIInputViewController {
     private func buildKeyboard() {
         clearStack()
         slideKeys = []
+        pendingVariantKey = nil
+        pendingBaseChar = nil
+        // v0.4 (Brian): coming back to the letters after "? ", "! " or
+        // ". " must start capitalised. autoShiftIfNeeded only fires in
+        // letters mode, and the keys built below read `shift` for their
+        // titles, so checking here covers the ABC-return path that
+        // spaceTapped's own check missed (mode was still .symbols then).
+        autoShiftIfNeeded()
 
         mainStack.addArrangedSubview(suggestionBar)
 
@@ -375,7 +393,7 @@ class KeyboardViewController: UIInputViewController {
         // .fillEqually for uniform key rows: with plain .fill the stack gives
         // ALL spare width to the first key (V1.1 bug: giant Q and A keys).
         row.distribution = equal ? .fillEqually : .fill
-        row.spacing = 6
+        row.spacing = 0   // v0.4: keys touch — no dead gap to fall into
         row.heightAnchor.constraint(equalToConstant: 56).isActive = true
         for key in keys { row.addArrangedSubview(key) }
         return row
@@ -475,7 +493,8 @@ class KeyboardViewController: UIInputViewController {
             // right edge where Brian's wide thumb makes partial contact.
             // Give it a bigger invisible net (steals a slice from K's edge).
             // (The V1.7 proximity rescue also assigns it the screen edge.)
-            if ch == "l" { k.hitExpand = 6 }
+            // v0.4: no hitExpand anywhere — with zero gaps the frames tile
+            // exactly; an expansion would steal from the neighbour.
             row2.append(k); letterButtons.append(k)
         }
         mainStack.addArrangedSubview(makeRow(row2))
@@ -571,7 +590,7 @@ class KeyboardViewController: UIInputViewController {
         space.layer.cornerRadius = 12
         space.haptic = .heavySpace
         space.isSpaceKey = true
-        space.hitExpand = 8   // space "steals" a few points from its neighbours' edges
+        // v0.4: space no longer steals edge points — zero-gap tiling.
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)   // commit on contact, like the letters
         space.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
         // V1.8: long-press space = the prudent corrector's ON/OFF switch.
@@ -590,9 +609,8 @@ class KeyboardViewController: UIInputViewController {
         // for a longer space bar ("todo ayuda"). A sliver stays: proximity
         // never assigns Return anyway, so the gap is now just insurance
         // for a direct hit drifting right.
-        let gap = UIView()
-        gap.widthAnchor.constraint(equalToConstant: 4).isActive = true
-        row.addArrangedSubview(gap)
+        // v0.4: the 4pt safety gap before Return is gone too — zero gaps
+        // means zero; Return simply starts where space ends.
 
         let ret = KeyButton(type: .system)
         ret.setTitle("⏎", for: .normal)
@@ -655,11 +673,26 @@ class KeyboardViewController: UIInputViewController {
         guard let s = sender.title(for: .normal) else { return }
         // The base character was already inserted on touch-down (V1.5);
         // choosing a variant REPLACES it instead of adding a second char.
-        if pendingVariantKey != nil {
-            textDocumentProxy.deleteBackward()
-            pendingVariantKey = nil
-            if !localWord.isEmpty { localWord.removeLast() }
+        // v0.4 defensive fix (Brian's bug: "á" also deleted the letter
+        // BEFORE the a): delete only when the document's real last
+        // character is exactly the base char this key inserted;
+        // otherwise insert without deleting. Every outcome is logged
+        // (VAR) so a recurrence is measurable instead of mysterious.
+        var deleted = false
+        if pendingVariantKey != nil, let base = pendingBaseChar {
+            let context = textDocumentProxy.documentContextBeforeInput ?? ""
+            if let last = context.last, String(last) == base {
+                textDocumentProxy.deleteBackward()
+                if !localWord.isEmpty { localWord.removeLast() }
+                deleted = true
+            }
         }
+        if logEnabled {
+            logEvent(k: "VAR:" + s, m: deleted ? "var-fix" : "var-keep",
+                     viewPoint: .zero, frame: nil)
+        }
+        pendingVariantKey = nil
+        pendingBaseChar = nil
         insertTextSmart(s)
         hideVariants()
     }
@@ -996,7 +1029,9 @@ class KeyboardViewController: UIInputViewController {
     private func stripButton(_ title: String, _ action: Selector) -> UIButton {
         let b = UIButton(type: .system)
         b.setTitle(title, for: .normal)
-        b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        b.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        b.titleLabel?.adjustsFontSizeToFitWidth = true   // v0.4: no more "…do: SÍ"
+        b.titleLabel?.minimumScaleFactor = 0.6
         b.setTitleColor(.label, for: .normal)
         b.backgroundColor = .systemOrange.withAlphaComponent(0.30)
         b.layer.cornerRadius = 8
@@ -1011,7 +1046,7 @@ class KeyboardViewController: UIInputViewController {
             arranged.removeFromSuperview()
         }
         variantStrip.addArrangedSubview(stripButton(
-            logEnabled ? "⏺ Grabando: SÍ" : "⏺ Grabar: NO", #selector(logToggleTapped)))
+            logEnabled ? "⏺ Grabando SÍ" : "⏺ Grabar NO", #selector(logToggleTapped)))
         variantStrip.addArrangedSubview(stripButton("📋 Copiar (\(logCount))", #selector(logCopyTapped)))
         variantStrip.addArrangedSubview(stripButton("🗑 Borrar", #selector(logClearTapped)))
         let close = UIButton(type: .system)
@@ -1033,8 +1068,8 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.addArrangedSubview(stripButton(
             popupEnabled ? "👁 Popup: SÍ" : "👁 Popup: NO", #selector(popupToggleTapped)))
         panelStrip.addArrangedSubview(stripButton(
-            suggEnabled ? "💡 Sugerencias: SÍ" : "💡 Sugerencias: NO", #selector(suggToggleTapped)))
-        let ver = stripButton("BrianKeys v0.3 Speed Lab", #selector(popupToggleTapped))
+            suggEnabled ? "💡 Suger: SÍ" : "💡 Suger: NO", #selector(suggToggleTapped)))
+        let ver = stripButton("BrianKeys v0.4 Speed Lab", #selector(popupToggleTapped))
         ver.isEnabled = false
         panelStrip.addArrangedSubview(ver)
         panelStrip.isHidden = false
@@ -1222,6 +1257,7 @@ class KeyboardViewController: UIInputViewController {
         guard let label = sender.accessibilityLabel ?? sender.title(for: .normal) else { return }
         insertTextSmart(label)
         pendingVariantKey = sender   // a long-press variant may replace this char
+        pendingBaseChar = localWord.last.map { String($0) }
         showPopup(for: sender)
     }
 
@@ -1240,6 +1276,7 @@ class KeyboardViewController: UIInputViewController {
         } else if let label = target.accessibilityLabel ?? target.title(for: .normal) {
             insertTextSmart(label)
             pendingVariantKey = target
+            pendingBaseChar = localWord.last.map { String($0) }
             showPopup(for: target)
         }
     }
@@ -1281,6 +1318,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func spaceTapped() {
+        pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: word boundary
         completeWord()   // the word before this space is complete
         localWord = ""
         let now = Date()
@@ -1306,6 +1344,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func returnTapped() {
+        pendingVariantKey = nil; pendingBaseChar = nil   // v0.4
         completeWord()
         localWord = ""
         textDocumentProxy.insertText("\n")
@@ -1313,6 +1352,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func deleteTapped() {
+        pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: base char may be gone
         textDocumentProxy.deleteBackward()
         if !localWord.isEmpty { localWord.removeLast() }
         updateSuggestions()

@@ -19,9 +19,16 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("BrianKeys")
-                    .font(.title2)
-                    .bold()
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("BrianKeys")
+                        .font(.title2)
+                        .bold()
+                    // v0.4 (Brian): the version sits right of the title so
+                    // he can confirm at a glance what is installed.
+                    Text("v0.4")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
 
                 Text("Actívalo en Ajustes → General → Teclado → Teclados → BrianKeysTest, y no olvides «Permitir acceso total» (lo necesitan los haptics).")
                     .font(.subheadline)
