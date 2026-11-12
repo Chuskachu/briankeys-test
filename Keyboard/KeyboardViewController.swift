@@ -87,7 +87,7 @@ private class KeyButton: UIButton {
 
 class KeyboardViewController: UIInputViewController {
 
-    private enum Mode { case letters, numbers, symbols }
+    private enum Mode { case letters, numbers, symbols, emoji }
     private enum Shift { case off, once, locked }
 
     private var mode: Mode = .letters
@@ -320,6 +320,7 @@ class KeyboardViewController: UIInputViewController {
         case .letters: buildLetters()
         case .numbers: buildNumbers()
         case .symbols: buildSymbols()
+        case .emoji: buildEmoji()
         }
         // V1.8: space is NOT a slide target anymore. V1.7 data showed a
         // space sneaking in before commas and question marks — his drag
@@ -559,11 +560,84 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: Bottom row (shared)
 
+    // v0.5 (Brian): our own emoji page — his pick over jumping to the
+    // system emoji keyboard. ☺ on the letters page opens it; tapping an
+    // emoji inserts it and the page STAYS open (several in a row is
+    // normal); ABC comes back to the letters.
+    private func buildEmoji() {
+        let rows: [[String]] = [
+            ["😂", "🤣", "😄", "😅", "😊", "🥰", "😍", "😘"],
+            ["😉", "😎", "🤔", "🤨", "😴", "🥱", "😢", "😭"],
+            ["😱", "🤯", "🥳", "👍", "👎", "🙏", "👏", "💪"],
+            ["❤️", "🔥", "🎉", "✨", "⭐", "🎮", "☕", "🍺"]
+        ]
+        for emojis in rows {
+            let row = UIStackView()
+            row.axis = .horizontal
+            row.distribution = .fillEqually
+            row.spacing = 0   // zero-gap tiling, like the letter keys
+            row.heightAnchor.constraint(equalToConstant: 56).isActive = true
+            for e in emojis {
+                let b = UIButton(type: .system)
+                b.setTitle(e, for: .normal)
+                b.titleLabel?.font = .systemFont(ofSize: 26)
+                b.backgroundColor = keyColor
+                b.layer.cornerRadius = 12
+                b.addTarget(self, action: #selector(emojiTouchDown(_:)), for: .touchDown)
+                b.addTarget(self, action: #selector(emojiTouchUp(_:)), for: [.touchUpOutside, .touchCancel])
+                b.addTarget(self, action: #selector(emojiTapped(_:)), for: .touchUpInside)
+                row.addArrangedSubview(b)
+            }
+            mainStack.addArrangedSubview(row)
+        }
+        // Bottom row: ABC back, a space, and delete (hold repeats).
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.distribution = .fill
+        row.spacing = 0
+        row.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        let abc = functionKey("ABC", action: #selector(showLetters))
+        abc.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        row.addArrangedSubview(abc)
+        let space = KeyButton(type: .system)
+        space.setTitle("space", for: .normal)
+        space.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
+        space.setTitleColor(.label, for: .normal)
+        paint(space, normal: keyColor, pressed: keyPressedColor)
+        space.layer.cornerRadius = 12
+        space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)
+        row.addArrangedSubview(space)
+        let del = functionKey("⌫", action: #selector(deleteTapped))
+        del.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        addDeleteHold(to: del)
+        row.addArrangedSubview(del)
+        mainStack.addArrangedSubview(row)
+    }
+
+    @objc private func emojiTouchDown(_ sender: UIButton) {
+        sender.backgroundColor = keyPressedColor
+    }
+
+    @objc private func emojiTouchUp(_ sender: UIButton) {
+        sender.backgroundColor = keyColor
+    }
+
+    @objc private func emojiTapped(_ sender: UIButton) {
+        sender.backgroundColor = keyColor
+        guard let e = sender.title(for: .normal) else { return }
+        completeWord()          // the word before the emoji is finished
+        localWord = ""
+        pendingVariantKey = nil; pendingBaseChar = nil
+        textDocumentProxy.insertText(e)
+        updateSuggestions()
+        // Stay on the emoji page: Brian may want two or three in a row.
+    }
+
     private func bottomRow(modeTitle: String, modeAction: Selector) -> UIStackView {
         let row = UIStackView()
         row.axis = .horizontal
         row.distribution = .fill
-        row.spacing = 6
+        row.spacing = 0   // v0.4 zero-gap tiling applies to this row too
         row.heightAnchor.constraint(equalToConstant: 56).isActive = true
 
         // NO globe key (V1.3, Brian: "ese logo del mundo molesta"). It sat
@@ -575,6 +649,15 @@ class KeyboardViewController: UIInputViewController {
         // space bar can grow.
         modeBtn.widthAnchor.constraint(equalToConstant: 38).isActive = true
         row.addArrangedSubview(modeBtn)
+
+        if mode == .letters {
+            // v0.5 (Brian): the smiley button he missed — opens our own
+            // emoji page. Its width comes out of the space bar.
+            let emojiBtn = functionKey("☺", action: #selector(showEmoji))
+            emojiBtn.titleLabel?.font = .systemFont(ofSize: 20)
+            emojiBtn.widthAnchor.constraint(equalToConstant: 34).isActive = true
+            row.addArrangedSubview(emojiBtn)
+        }
 
         let comma = punctKey(",")
         comma.variants = [".", "?", "!", "¿", "¡"]
@@ -1069,7 +1152,7 @@ class KeyboardViewController: UIInputViewController {
             popupEnabled ? "👁 Popup: SÍ" : "👁 Popup: NO", #selector(popupToggleTapped)))
         panelStrip.addArrangedSubview(stripButton(
             suggEnabled ? "💡 Suger: SÍ" : "💡 Suger: NO", #selector(suggToggleTapped)))
-        let ver = stripButton("BrianKeys v0.4 Speed Lab", #selector(popupToggleTapped))
+        let ver = stripButton("BrianKeys v0.5 Speed Lab", #selector(popupToggleTapped))
         ver.isEnabled = false
         panelStrip.addArrangedSubview(ver)
         panelStrip.isHidden = false
@@ -1408,6 +1491,10 @@ class KeyboardViewController: UIInputViewController {
     @objc private func showLetters() {
         if logPanelJustOpened { logPanelJustOpened = false; return }
         mode = .letters; buildKeyboard()
+    }
+    @objc private func showEmoji() {
+        if logPanelJustOpened { logPanelJustOpened = false; return }
+        mode = .emoji; buildKeyboard()
     }
 
     // MARK: - Auto-shift (never autocorrect — capitals only)
