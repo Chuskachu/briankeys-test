@@ -135,6 +135,24 @@ class KeyboardViewController: UIInputViewController {
     private lazy var learned: [String: Int] = {
         UserDefaults.standard.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
     }()
+
+    // MARK: - Corrección prudente (V1.8 — Brian's choice, 2026-11-12)
+    //
+    // Registration alone hit a physical wall: Brian's thumb patch covers
+    // two keys, so intent is not in the touch signal. His answer: an
+    // AUTOMATIC corrector, but a prudent one, under HIS rules:
+    // - It only touches words that exist in NEITHER Spanish nor English.
+    // - It acts only when there is exactly ONE plausible candidate.
+    // - His words (seeds, and anything learned twice) are untouchable.
+    // - It ships OFF; he switches it with a long-press on the space bar
+    //   (the switch lives in the keyboard: app↔extension settings need
+    //   App Groups, unproven under SideStore re-signing).
+    // Every fix announces itself with a soft double-tick haptic so he can
+    // FEEL the keyboard act — transparency he can notice, never silent.
+    private let prudentKey = "bk_prudent_v1"
+    private lazy var prudentEnabled: Bool = UserDefaults.standard.bool(forKey: prudentKey)
+    private lazy var foldedESSet: Set<String> = Set(foldedES)
+    private lazy var foldedENSet: Set<String> = Set(foldedEN)
     private lazy var foldedES: [String] = WordLists.es.map { fold($0) }
     private lazy var foldedEN: [String] = WordLists.en.map { fold($0) }
     private lazy var foldedSeeds: [String] = seedWords.map { fold($0) }
@@ -230,7 +248,12 @@ class KeyboardViewController: UIInputViewController {
         case .numbers: buildNumbers()
         case .symbols: buildSymbols()
         }
-        KeyButton.slideTargets = slideKeys
+        // V1.8: space is NOT a slide target anymore. V1.7 data showed a
+        // space sneaking in before commas and question marks — his drag
+        // toward the punctuation clipped the space bar on the way past.
+        // Space still commits on direct touch (and via proximity rescue,
+        // which reads slideKeys, not slideTargets).
+        KeyButton.slideTargets = slideKeys.filter { !$0.isSpaceKey }
         updateSuggestions()
     }
 
@@ -329,21 +352,23 @@ class KeyboardViewController: UIInputViewController {
         // generator: an unprepared generator answers late, and a late
         // pulse reads as a slow keyboard even when the letter landed.
         switch sender.haptic {
-        case .lightKey:   // letters & punctuation: one firm pulse
-            hapticMedium.impactOccurred(intensity: 1.0)
+        case .lightKey:   // letters & punctuation: one clear pulse
+            // V1.8: V1.7's full-strength 1.0 felt TOO strong (Brian) —
+            // the pattern was right, the volume was not.
+            hapticMedium.impactOccurred(intensity: 0.65)
             hapticMedium.prepare()
         case .heavySpace: // space: heavy DOUBLE pulse — unmistakable
-            hapticHeavy.impactOccurred(intensity: 1.0)
+            hapticHeavy.impactOccurred(intensity: 0.85)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
-                self?.hapticHeavy.impactOccurred(intensity: 0.85)
+                self?.hapticHeavy.impactOccurred(intensity: 0.55)
                 self?.hapticHeavy.prepare()
             }
             hapticHeavy.prepare()
         case .rigidDelete:
-            hapticRigid.impactOccurred(intensity: 0.9)
+            hapticRigid.impactOccurred(intensity: 0.75)
             hapticRigid.prepare()
         case .mediumReturn:
-            hapticHeavy.impactOccurred(intensity: 1.0)
+            hapticHeavy.impactOccurred(intensity: 0.85)
             hapticHeavy.prepare()
         case .select:
             hapticSelect.selectionChanged()
@@ -486,6 +511,10 @@ class KeyboardViewController: UIInputViewController {
         space.hitExpand = 8   // space "steals" a few points from its neighbours' edges
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)   // commit on contact, like the letters
         space.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
+        // V1.8: long-press space = the prudent corrector's ON/OFF switch.
+        let spaceLP = UILongPressGestureRecognizer(target: self, action: #selector(spaceLongPressed(_:)))
+        spaceLP.minimumPressDuration = 0.4
+        space.addGestureRecognizer(spaceLP)
         // Dragging into space also types a space (V1.6).
         space.slideEnabled = true
         space.onSlideCommit = { [weak self] target in self?.slideCommit(target) }
@@ -589,9 +618,8 @@ class KeyboardViewController: UIInputViewController {
         return word
     }
 
-    /// Count a completed word so the bar learns Brian's vocabulary.
-    private func learnWordBeforeDelimiter() {
-        let w = currentWord()
+    /// Count a word so the bar learns Brian's vocabulary.
+    private func learn(_ w: String) {
         guard w.count >= 2 else { return }
         learned[w, default: 0] += 1
         if learned.count > 800 {   // keep the store lean: top 400 survive
@@ -600,6 +628,118 @@ class KeyboardViewController: UIInputViewController {
         }
         UserDefaults.standard.set(learned, forKey: learnedKey)
     }
+
+    /// A word was just completed (space / punctuation / return): first
+    /// let the prudent corrector judge it, then learn the FINAL form —
+    /// a corrected word reinforces its correction, and the raw typo is
+    /// never learned.
+    private func completeWord() {
+        let w = currentWord()
+        guard w.count >= 2 else { return }
+        var final = w
+        if prudentEnabled, let fixed = prudentFix(for: w) {
+            replaceCurrentWord(with: fixed)
+            final = fixed
+            // The corrector's signature: two soft ticks — "I acted".
+            hapticLight.impactOccurred(intensity: 0.7)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+                self?.hapticLight.impactOccurred(intensity: 0.7)
+                self?.hapticLight.prepare()
+            }
+        }
+        learn(final)
+    }
+
+    /// The prudent judge. Returns the ONE acceptable correction for a
+    /// non-word, or nil — nil is its favourite answer.
+    private func prudentFix(for w: String) -> String? {
+        guard w.count >= 4 else { return nil }
+        // All-caps words are acronyms and intentions, not typos.
+        if w == w.uppercased() { return nil }
+        let fw = fold(w)
+        // It must be a NON-WORD in both languages (accents/case folded —
+        // "alegria" IS "alegría" minus effort; the chips offer the accent).
+        if foldedESSet.contains(fw) || foldedENSet.contains(fw) { return nil }
+        // His seeds are sacred.
+        if foldedSeeds.contains(fw) { return nil }
+        // A learned word he has completed twice is vocabulary, not error.
+        // (Once could be a typo; twice is a choice.)
+        for (surface, count) in learned where count >= 2 && fold(surface) == fw { return nil }
+        // Candidate pool: his words first, then the top of both lists.
+        let budget = w.count >= 7 ? 2 : 1
+        var candidates: [String] = []
+        func consider(_ surface: String, _ foldedForm: String) {
+            let d = osaDistance(fw, foldedForm, maxDist: budget)
+            if d == 0 { candidates.append("\u{0}EXACT") ; return }  // folded-equal = it IS a word
+            if d <= budget { candidates.append(surface) }
+        }
+        for (i, seed) in seedWords.enumerated() { consider(seed, foldedSeeds[i]) }
+        for (surface, _) in learned { consider(surface, fold(surface)) }
+        for i in 0..<min(1200, WordLists.es.count) { consider(WordLists.es[i], foldedES[i]) }
+        for i in 0..<min(1200, WordLists.en.count) { consider(WordLists.en[i], foldedEN[i]) }
+        if candidates.contains("\u{0}EXACT") { return nil }
+        // Act only on a UNIQUE candidate — two plausible fixes = no fix.
+        let unique = Array(Set(candidates))
+        guard unique.count == 1, var fixed = unique.first else { return nil }
+        // Keep his capitalisation.
+        if let first = w.first, first.isUppercase {
+            fixed = fixed.prefix(1).uppercased() + fixed.dropFirst()
+        }
+        return fixed
+    }
+
+    /// Optimal string alignment distance (Levenshtein + transposition
+    /// counts as ONE edit — "borwn" is one slip away from "brown"),
+    /// with early exit once the distance provably exceeds maxDist.
+    private func osaDistance(_ a: String, _ b: String, maxDist: Int) -> Int {
+        let x = Array(a), y = Array(b)
+        if abs(x.count - y.count) > maxDist { return maxDist + 1 }
+        var prev2: [Int]? = nil
+        var prev = Array(0...y.count)
+        var cur = [Int](repeating: 0, count: y.count + 1)
+        for i in 1...x.count {
+            cur[0] = i
+            var rowMin = cur[0]
+            for j in 1...y.count {
+                let cost = x[i - 1] == y[j - 1] ? 0 : 1
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+                if i > 1, j > 1, x[i - 1] == y[j - 2], x[i - 2] == y[j - 1], let p2 = prev2 {
+                    cur[j] = min(cur[j], p2[j - 2] + 1)
+                }
+                rowMin = min(rowMin, cur[j])
+            }
+            if rowMin > maxDist { return maxDist + 1 }
+            prev2 = prev
+            prev = cur
+            cur = [Int](repeating: 0, count: y.count + 1)
+        }
+        return prev[y.count]
+    }
+
+    private func replaceCurrentWord(with fixed: String) {
+        let w = currentWord()
+        for _ in w { textDocumentProxy.deleteBackward() }
+        textDocumentProxy.insertText(fixed)
+    }
+
+    /// Long-press on space: the prudent corrector's switch + a flash in
+    /// the bar so he SEES the state change.
+    @objc private func spaceLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        prudentEnabled.toggle()
+        UserDefaults.standard.set(prudentEnabled, forKey: prudentKey)
+        hapticSelect.selectionChanged()
+        chips[0].setTitle("Corrección prudente", for: .normal)
+        chips[1].setTitle(prudentEnabled ? "ACTIVADA ✓" : "apagada", for: .normal)
+        chips[2].setTitle("", for: .normal)
+        for c in chips { c.isEnabled = false; c.alpha = 1 }
+        NSObject.cancelPreviousPerformRequests(withTarget: self,
+                                               selector: #selector(refreshBar),
+                                               object: nil)
+        perform(#selector(refreshBar), with: nil, afterDelay: 1.4)
+    }
+
+    @objc private func refreshBar() { updateSuggestions() }
 
     private func computeSuggestions(for prefix: String) -> [String] {
         if prefix.isEmpty {
@@ -664,8 +804,7 @@ class KeyboardViewController: UIInputViewController {
             if shift == .once { shift = .off; applyShiftVisuals() }
         }
         textDocumentProxy.insertText(word)
-        learned[word, default: 0] += 1
-        UserDefaults.standard.set(learned, forKey: learnedKey)
+        learn(word)
         textDocumentProxy.insertText(" ")
         lastSpaceAt = nil
         autoShiftIfNeeded()
@@ -687,6 +826,12 @@ class KeyboardViewController: UIInputViewController {
         for touch in touches {
             if touch.view is UIButton { continue }   // buttons handle themselves
             let p = touch.location(in: nil)
+            // Never rescue from the suggestion bar or the variants strip:
+            // a brush across them must not rain letters from the top row.
+            if suggestionBar != nil, suggestionBar.window != nil,
+               suggestionBar.convert(suggestionBar.bounds, to: nil).contains(p) { continue }
+            if variantStrip != nil, !variantStrip.isHidden, variantStrip.window != nil,
+               variantStrip.convert(variantStrip.bounds, to: nil).contains(p) { continue }
             guard let key = nearestTypingKey(to: p, strict: false) else { continue }
             rescuedTouches[ObjectIdentifier(touch)] = [ObjectIdentifier(key)]
             slideCommit(key)
@@ -745,7 +890,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func insertTextSmart(_ text: String) {
         if text.count == 1, let c = text.first, !c.isLetter, c != " " {
-            learnWordBeforeDelimiter()   // a punctuation mark completes a word
+            completeWord()   // a punctuation mark completes a word
         }
         lastSpaceAt = nil   // any real character breaks a double-space chain
         var out = text
@@ -832,7 +977,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func spaceTapped() {
-        learnWordBeforeDelimiter()   // the word before this space is complete
+        completeWord()   // the word before this space is complete
         let now = Date()
         let before = textDocumentProxy.documentContextBeforeInput ?? ""
         // Double space → ". " (Brian, V1.6): two quick spaces after a word
@@ -856,7 +1001,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func returnTapped() {
-        learnWordBeforeDelimiter()
+        completeWord()
         textDocumentProxy.insertText("\n")
         updateSuggestions()
     }
