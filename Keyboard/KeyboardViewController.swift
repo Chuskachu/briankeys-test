@@ -50,11 +50,17 @@ private class KeyButton: UIButton {
     // submit by accident.
     static var slideTargets: [KeyButton] = []
     var slideEnabled = false
-    var onSlideCommit: ((KeyButton) -> Void)?
+    var onSlideCommit: ((KeyButton, CGPoint) -> Void)?
     private var slidCommitted: Set<ObjectIdentifier> = []
+
+    /// V1.9 touch logger hook: every physical touch-down on any key is
+    /// reported (with its window point) before any action fires — the
+    /// raw material for measuring where Brian's thumb actually lands.
+    static var onAnyTouchDown: ((KeyButton, CGPoint) -> Void)?
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         slidCommitted = [ObjectIdentifier(self)]
+        if let t = touches.first { KeyButton.onAnyTouchDown?(self, t.location(in: nil)) }
         super.touchesBegan(touches, with: event)
     }
 
@@ -69,7 +75,7 @@ private class KeyButton: UIButton {
             let f = target.convert(target.bounds, to: nil).insetBy(dx: 6, dy: 5)
             if f.contains(p) {
                 slidCommitted.insert(id)
-                handler(target)
+                handler(target, p)
             }
         }
     }
@@ -170,6 +176,11 @@ class KeyboardViewController: UIInputViewController {
         hapticHeavy.prepare()
         hapticRigid.prepare()
         hapticSelect.prepare()
+
+        // V1.9 touch logger: observe every key's physical touch-down.
+        KeyButton.onAnyTouchDown = { [weak self] key, wpt in
+            self?.touchDownObserved(key, windowPoint: wpt)
+        }
 
         heightConstraint = NSLayoutConstraint(item: view!, attribute: .height,
                                         relatedBy: .equal, toItem: nil,
@@ -327,7 +338,7 @@ class KeyboardViewController: UIInputViewController {
         b.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
         // This key can also be typed by dragging into it (V1.6).
         b.slideEnabled = true
-        b.onSlideCommit = { [weak self] target in self?.slideCommit(target) }
+        b.onSlideCommit = { [weak self] target, pt in self?.slideCommit(target, windowPoint: pt, via: "slide") }
         slideKeys.append(b)
         if !variants.isEmpty { addLongPress(to: b) }
         return b
@@ -344,6 +355,13 @@ class KeyboardViewController: UIInputViewController {
         b.addTarget(self, action: action, for: .touchUpInside)
         b.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
         b.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // V1.9: long-press on a page key (123 / ABC / #+=) opens the
+        // touch-log panel — recording toggle, copy, erase.
+        if ["123", "ABC", "#+="].contains(title) {
+            let lp = UILongPressGestureRecognizer(target: self, action: #selector(logPanelPressed(_:)))
+            lp.minimumPressDuration = 0.4
+            b.addGestureRecognizer(lp)
+        }
         return b
     }
 
@@ -515,9 +533,10 @@ class KeyboardViewController: UIInputViewController {
         let spaceLP = UILongPressGestureRecognizer(target: self, action: #selector(spaceLongPressed(_:)))
         spaceLP.minimumPressDuration = 0.4
         space.addGestureRecognizer(spaceLP)
+        space.accessibilityLabel = "SPACE"
         // Dragging into space also types a space (V1.6).
         space.slideEnabled = true
-        space.onSlideCommit = { [weak self] target in self?.slideCommit(target) }
+        space.onSlideCommit = { [weak self] target, pt in self?.slideCommit(target, windowPoint: pt, via: "slide") }
         slideKeys.append(space)
         row.addArrangedSubview(space)
 
@@ -811,6 +830,173 @@ class KeyboardViewController: UIInputViewController {
         updateSuggestions()
     }
 
+    // MARK: - Touch logger (V1.9 — Brian's idea, 2026-11-12)
+    //
+    // Five versions of guessing his thumb drift were enough: MEASURE it.
+    // When recording is ON (his switch, default OFF), every commit is
+    // logged as one JSON line: epoch-ms, key, method (tap / slide /
+    // rescue / rslide / down-fn / miss), the touch point and the key's
+    // frame, in keyboard-view points. The log lives in the extension's
+    // own container (the app cannot read it — App Groups wall), so it
+    // leaves the phone only when Brian taps "Copiar log" in the panel
+    // (long-press 123) and pastes it to Muse himself. Capped at ~5,000
+    // events. His SwiftKey warning stands: this is a measuring
+    // instrument, not an invisible auto-tuner — any hit-zone warping
+    // must first prove itself in the suite data.
+
+    private let logOnKey = "bk_log_on_v1"
+    private lazy var logEnabled: Bool = UserDefaults.standard.bool(forKey: logOnKey)
+    private var logHandle: FileHandle?
+    private var logOpened = false
+    private var logCount = 0
+
+    private var logURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("bk_touchlog.jsonl")
+    }
+
+    private func keyLabel(_ key: KeyButton) -> String {
+        key.accessibilityLabel ?? key.title(for: .normal) ?? "?"
+    }
+
+    private func touchDownObserved(_ key: KeyButton, windowPoint: CGPoint) {
+        guard logEnabled else { return }
+        let isTyping = slideKeys.contains { $0 === key }
+        logEvent(k: keyLabel(key), m: isTyping ? "tap" : "down-fn",
+                 viewPoint: view.convert(windowPoint, from: nil),
+                 frame: key.convert(key.bounds, to: view))
+    }
+
+    private func logEvent(k: String, m: String, viewPoint: CGPoint, frame: CGRect?) {
+        let t = Int(Date().timeIntervalSince1970 * 1000)
+        let safeK = k.replacingOccurrences(of: "\\", with: "\\\\")
+                     .replacingOccurrences(of: "\"", with: "\\\"")
+        var line = "{\"t\":\(t),\"k\":\"\(safeK)\",\"m\":\"\(m)\",\"x\":\(Int(viewPoint.x.rounded())),\"y\":\(Int(viewPoint.y.rounded()))"
+        if let f = frame {
+            line += ",\"f\":[\(Int(f.origin.x.rounded())),\(Int(f.origin.y.rounded())),\(Int(f.size.width.rounded())),\(Int(f.size.height.rounded()))]"
+        }
+        line += "}\n"
+        appendLogLine(line)
+    }
+
+    private func appendLogLine(_ line: String) {
+        if !logOpened {
+            logOpened = true
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+                logCount = 0
+            } else if let data = try? Data(contentsOf: logURL) {
+                logCount = data.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
+            }
+            logHandle = try? FileHandle(forWritingTo: logURL)
+            _ = try? logHandle?.seekToEnd()
+        }
+        guard let h = logHandle, let d = line.data(using: .utf8) else { return }
+        h.write(d)
+        logCount += 1
+        if logCount > 5000 { trimLog() }
+    }
+
+    /// Keep the newest 4,000 events when the cap is crossed.
+    private func trimLog() {
+        try? logHandle?.close()
+        logHandle = nil
+        if let text = try? String(contentsOf: logURL, encoding: .utf8) {
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: true).suffix(4000)
+            try? lines.joined(separator: "\n").appending("\n").write(to: logURL, atomically: true, encoding: .utf8)
+            logCount = lines.count
+        }
+        logHandle = try? FileHandle(forWritingTo: logURL)
+        _ = try? logHandle?.seekToEnd()
+    }
+
+    // MARK: Log panel (long-press 123)
+
+    /// Set when the log panel opens: the mode key's own touchUpInside
+    /// fires when the long-press is released, and it must NOT switch
+    /// pages and tear the panel down. Consumed once by the mode actions.
+    private var logPanelJustOpened = false
+
+    @objc private func logPanelPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        logPanelJustOpened = true
+        hapticSelect.selectionChanged()
+        showLogPanel()
+    }
+
+    private func stripButton(_ title: String, _ action: Selector) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setTitle(title, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        b.setTitleColor(.label, for: .normal)
+        b.backgroundColor = .systemOrange.withAlphaComponent(0.30)
+        b.layer.cornerRadius = 8
+        b.addTarget(self, action: action, for: .touchUpInside)
+        return b
+    }
+
+    private func showLogPanel() {
+        for arranged in variantStrip.arrangedSubviews {
+            variantStrip.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        variantStrip.addArrangedSubview(stripButton(
+            logEnabled ? "⏺ Grabando: SÍ" : "⏺ Grabar: NO", #selector(logToggleTapped)))
+        variantStrip.addArrangedSubview(stripButton("📋 Copiar (\(logCount))", #selector(logCopyTapped)))
+        variantStrip.addArrangedSubview(stripButton("🗑 Borrar", #selector(logClearTapped)))
+        let close = UIButton(type: .system)
+        close.setTitle("✕", for: .normal)
+        close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
+        close.setTitleColor(.label, for: .normal)
+        close.backgroundColor = .tertiarySystemBackground
+        close.layer.cornerRadius = 8
+        close.addTarget(self, action: #selector(hideVariants), for: .touchUpInside)
+        variantStrip.addArrangedSubview(close)
+        variantStrip.isHidden = false
+        heightConstraint.constant = 368
+    }
+
+    @objc private func logToggleTapped() {
+        logEnabled.toggle()
+        UserDefaults.standard.set(logEnabled, forKey: logOnKey)
+        hapticSelect.selectionChanged()
+        showLogPanel()   // rebuild so the state and count are current
+    }
+
+    @objc private func logCopyTapped() {
+        try? logHandle?.synchronize()
+        let text = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+        hideVariants()
+        if text.isEmpty {
+            flashBar("Log vacío", "")
+        } else {
+            UIPasteboard.general.string = text
+            flashBar("✓ Log copiado", "\(logCount) toques")
+        }
+    }
+
+    @objc private func logClearTapped() {
+        try? logHandle?.close()
+        logHandle = nil
+        logOpened = false
+        logCount = 0
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        hideVariants()
+        flashBar("🗑 Log borrado", "")
+    }
+
+    /// Show a two-part message in the suggestion bar for ~1.4s.
+    private func flashBar(_ a: String, _ b: String) {
+        chips[0].setTitle(a, for: .normal)
+        chips[1].setTitle(b, for: .normal)
+        chips[2].setTitle("", for: .normal)
+        for c in chips { c.isEnabled = false; c.alpha = 1 }
+        NSObject.cancelPreviousPerformRequests(withTarget: self,
+                                               selector: #selector(refreshBar),
+                                               object: nil)
+        perform(#selector(refreshBar), with: nil, afterDelay: 1.4)
+    }
+
     // MARK: - Proximity rescue (V1.7)
     //
     // Buttons only hear touches that BEGIN on them. A wide thumb landing
@@ -832,9 +1018,16 @@ class KeyboardViewController: UIInputViewController {
                suggestionBar.convert(suggestionBar.bounds, to: nil).contains(p) { continue }
             if variantStrip != nil, !variantStrip.isHidden, variantStrip.window != nil,
                variantStrip.convert(variantStrip.bounds, to: nil).contains(p) { continue }
-            guard let key = nearestTypingKey(to: p, strict: false) else { continue }
+            guard let key = nearestTypingKey(to: p, strict: false) else {
+                // A gap touch no typing key claimed: log the miss (only
+                // below the suggestion bar — brushes on the bar are noise).
+                if logEnabled, p.y > suggestionBar.convert(suggestionBar.bounds, to: nil).maxY {
+                    logEvent(k: "∅", m: "miss", viewPoint: view.convert(p, from: nil), frame: nil)
+                }
+                continue
+            }
             rescuedTouches[ObjectIdentifier(touch)] = [ObjectIdentifier(key)]
-            slideCommit(key)
+            slideCommit(key, windowPoint: p, via: "rescue")
         }
     }
 
@@ -848,7 +1041,7 @@ class KeyboardViewController: UIInputViewController {
                   !done.contains(ObjectIdentifier(key)) else { continue }
             done.insert(ObjectIdentifier(key))
             rescuedTouches[id] = done
-            slideCommit(key)
+            slideCommit(key, windowPoint: p, via: "rslide")
         }
     }
 
@@ -929,8 +1122,13 @@ class KeyboardViewController: UIInputViewController {
 
     /// A drag (or a rescued gap touch) entered this key — type it as if
     /// tapped. Only typing keys are ever passed here.
-    private func slideCommit(_ target: KeyButton) {
+    private func slideCommit(_ target: KeyButton, windowPoint: CGPoint, via: String) {
         guard variantStrip == nil || variantStrip.isHidden else { return }
+        if logEnabled {
+            logEvent(k: keyLabel(target), m: via,
+                     viewPoint: view.convert(windowPoint, from: nil),
+                     frame: target.convert(target.bounds, to: view))
+        }
         keyTouchedDown(target)   // the target family's own haptic
         if target.isSpaceKey {
             spaceTapped()
@@ -1048,9 +1246,18 @@ class KeyboardViewController: UIInputViewController {
         applyShiftVisuals()
     }
 
-    @objc private func showNumbers() { mode = .numbers; buildKeyboard() }
-    @objc private func showSymbols() { mode = .symbols; buildKeyboard() }
-    @objc private func showLetters() { mode = .letters; buildKeyboard() }
+    @objc private func showNumbers() {
+        if logPanelJustOpened { logPanelJustOpened = false; return }
+        mode = .numbers; buildKeyboard()
+    }
+    @objc private func showSymbols() {
+        if logPanelJustOpened { logPanelJustOpened = false; return }
+        mode = .symbols; buildKeyboard()
+    }
+    @objc private func showLetters() {
+        if logPanelJustOpened { logPanelJustOpened = false; return }
+        mode = .letters; buildKeyboard()
+    }
 
     // MARK: - Auto-shift (never autocorrect — capitals only)
 
