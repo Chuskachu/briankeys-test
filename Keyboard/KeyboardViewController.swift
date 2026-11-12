@@ -55,6 +55,13 @@ private class KeyButton: UIButton {
     var onSlideCommit: ((KeyButton, CGPoint) -> Void)?
     private var slidCommitted: Set<ObjectIdentifier> = []
 
+    // v0.5 (Brian): flick DOWN on the space bar = Enter (the Return key
+    // is gone; the bar runs to the right edge where his thumb lands).
+    // The VC converts the already-committed space into a newline.
+    var onFlickDown: (() -> Void)?
+    private var touchStartY: CGFloat?
+    private var flickFired = false
+
     /// V1.9 touch logger hook: every physical touch-down on any key is
     /// reported (with its window point) before any action fires — the
     /// raw material for measuring where Brian's thumb actually lands.
@@ -62,12 +69,23 @@ private class KeyButton: UIButton {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         slidCommitted = [ObjectIdentifier(self)]
-        if let t = touches.first { KeyButton.onAnyTouchDown?(self, t.location(in: nil)) }
+        flickFired = false
+        if let t = touches.first {
+            touchStartY = t.location(in: nil).y
+            KeyButton.onAnyTouchDown?(self, t.location(in: nil))
+        }
         super.touchesBegan(touches, with: event)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
+        // v0.5 flick check first: it must work even where slide is off
+        // (the emoji page's space bar has no slide machinery).
+        if isSpaceKey, !flickFired, let startY = touchStartY, let t = touches.first,
+           t.location(in: nil).y - startY >= 24 {
+            flickFired = true
+            onFlickDown?()
+        }
         guard slideEnabled, let touch = touches.first, let handler = onSlideCommit else { return }
         let p = touch.location(in: nil)   // window coordinates
         for target in KeyButton.slideTargets {
@@ -605,6 +623,8 @@ class KeyboardViewController: UIInputViewController {
         space.setTitleColor(.label, for: .normal)
         paint(space, normal: keyColor, pressed: keyPressedColor)
         space.layer.cornerRadius = 12
+        space.isSpaceKey = true   // v0.5: the flick works on this bar too
+        space.onFlickDown = { [weak self] in self?.spaceFlickedToEnter() }
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)
         row.addArrangedSubview(space)
         let del = functionKey("⌫", action: #selector(deleteTapped))
@@ -685,28 +705,16 @@ class KeyboardViewController: UIInputViewController {
         space.slideEnabled = true
         space.onSlideCommit = { [weak self] target, pt in self?.slideCommit(target, windowPoint: pt, via: "slide") }
         slideKeys.append(space)
+        // v0.5 (Brian): flick down on the bar = Enter.
+        space.onFlickDown = { [weak self] in self?.spaceFlickedToEnter() }
         row.addArrangedSubview(space)
 
-        // The buffer before Return (Brian's danger zone). V1.7: 10→4pt —
-        // Brian spotted the wasted space in his own screenshot and asked
-        // for a longer space bar ("todo ayuda"). A sliver stays: proximity
-        // never assigns Return anyway, so the gap is now just insurance
-        // for a direct hit drifting right.
-        // v0.4: the 4pt safety gap before Return is gone too — zero gaps
-        // means zero; Return simply starts where space ends.
-
-        let ret = KeyButton(type: .system)
-        ret.setTitle("⏎", for: .normal)
-        ret.titleLabel?.font = .systemFont(ofSize: 20, weight: .medium)
-        ret.setTitleColor(.label, for: .normal)
-        paint(ret, normal: UIColor.systemTeal.withAlphaComponent(0.35),
-              pressed: UIColor.systemTeal.withAlphaComponent(0.6))
-        ret.layer.cornerRadius = 12
-        ret.haptic = .mediumReturn
-        ret.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        ret.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
-        ret.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
-        row.addArrangedSubview(ret)
+        // v0.5 (Brian): THE RETURN KEY IS GONE. It was his danger zone
+        // from day one (hit by accident when aiming for space or
+        // delete); now the space bar runs to the right edge — where his
+        // thumb lands anyway — and Enter lives in the downward flick on
+        // the bar (see spaceFlickedToEnter). Flick only, no long-press
+        // Enter: the long-press keeps its corrector-toggle job.
 
         return row
     }
@@ -1424,6 +1432,22 @@ class KeyboardViewController: UIInputViewController {
         lastSpaceAt = now
         autoShiftIfNeeded()
         updateSuggestions()
+    }
+
+    /// v0.5 (Brian): the downward flick on the space bar = Enter. The
+    /// space was already committed on touch-down; convert it — but ONLY
+    /// when the document really ends with that plain space. If the tap
+    /// was the second half of a double-space, the text ends in ". " and
+    /// the flick is ignored (no half-converted punctuation).
+    @objc private func spaceFlickedToEnter() {
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard context.hasSuffix(" "), !context.hasSuffix(". ") else { return }
+        textDocumentProxy.deleteBackward()
+        lastSpaceAt = nil
+        if logEnabled {
+            logEvent(k: "SPACE", m: "flick-enter", viewPoint: .zero, frame: nil)
+        }
+        returnTapped()
     }
 
     @objc private func returnTapped() {
