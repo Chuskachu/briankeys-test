@@ -343,10 +343,9 @@ class KeyboardViewController: UIInputViewController {
         // when the host app asks the keyboard for the other appearance,
         // the frozen image kept the wrong mode's colour while the labels
         // followed the view — Brian's "se invierte el color" (2026-11-12).
-        let format = UIGraphicsImageRendererFormat()
-        format.traitCollection = traitCollection
-        return UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1), format: format).image { ctx in
-            color.setFill()
+        let resolved = color.resolvedColor(with: traitCollection)
+        return UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { ctx in
+            resolved.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
         }
     }
