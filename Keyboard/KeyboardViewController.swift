@@ -312,34 +312,52 @@ class KeyboardViewController: UIInputViewController {
         updateSuggestions()
     }
 
-    // Key colours with real separation in dark mode too.
+    // v0.3: iPhone-style palette (Brian asked for Apple's look): white
+    // keycaps in light mode, mid-grey in dark mode, grey function keys.
     private var keyColor: UIColor {
         UIColor { t in t.userInterfaceStyle == .dark
-            ? UIColor(red: 0.25, green: 0.25, blue: 0.28, alpha: 1)
-            : .secondarySystemBackground }
+            ? UIColor(red: 0.36, green: 0.36, blue: 0.38, alpha: 1)
+            : UIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1) }
     }
     private var functionKeyColor: UIColor {
         UIColor { t in t.userInterfaceStyle == .dark
-            ? UIColor(red: 0.13, green: 0.13, blue: 0.15, alpha: 1)
-            : .tertiarySystemBackground }
+            ? UIColor(red: 0.20, green: 0.20, blue: 0.22, alpha: 1)
+            : UIColor(red: 0.66, green: 0.68, blue: 0.72, alpha: 1) }
     }
     // Pressed-state colours: keys visibly react the instant they are
     // touched — part of "responde lento" was that nothing SEEMED to happen.
     private var keyPressedColor: UIColor {
         UIColor { t in t.userInterfaceStyle == .dark
-            ? UIColor(red: 0.38, green: 0.38, blue: 0.42, alpha: 1)
-            : .systemGray4 }
+            ? UIColor(red: 0.52, green: 0.52, blue: 0.55, alpha: 1)
+            : UIColor(red: 0.84, green: 0.85, blue: 0.87, alpha: 1) }
     }
     private var functionPressedColor: UIColor {
         UIColor { t in t.userInterfaceStyle == .dark
-            ? UIColor(red: 0.26, green: 0.26, blue: 0.29, alpha: 1)
-            : .systemGray3 }
+            ? UIColor(red: 0.30, green: 0.30, blue: 0.32, alpha: 1)
+            : UIColor(red: 0.52, green: 0.54, blue: 0.58, alpha: 1) }
     }
 
     private func solidImage(_ color: UIColor) -> UIImage {
-        UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { ctx in
+        // v0.3: bake the 1x1 image with the KEYBOARD's own trait
+        // collection. The default renderer uses the main screen's traits;
+        // when the host app asks the keyboard for the other appearance,
+        // the frozen image kept the wrong mode's colour while the labels
+        // followed the view — Brian's "se invierte el color" (2026-11-12).
+        let format = UIGraphicsImageRendererFormat()
+        format.traitCollection = traitCollection
+        return UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1), format: format).image { ctx in
             color.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+    }
+
+    // v0.3: if the appearance flips while the keyboard is up, repaint
+    // everything in the new mode instead of keeping frozen images.
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle,
+           mainStack != nil {
+            buildKeyboard()
         }
     }
 
@@ -371,7 +389,7 @@ class KeyboardViewController: UIInputViewController {
         b.titleLabel?.font = .systemFont(ofSize: 22, weight: .medium)
         b.setTitleColor(.label, for: .normal)
         paint(b, normal: keyColor, pressed: keyPressedColor)
-        b.layer.cornerRadius = 10
+        b.layer.cornerRadius = 12
         b.variants = variants
         b.haptic = .lightKey
         b.accessibilityLabel = char
@@ -394,7 +412,7 @@ class KeyboardViewController: UIInputViewController {
         b.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
         b.setTitleColor(.label, for: .normal)
         paint(b, normal: functionKeyColor, pressed: functionPressedColor)
-        b.layer.cornerRadius = 10
+        b.layer.cornerRadius = 12
         b.haptic = .select
         b.addTarget(self, action: action, for: .touchUpInside)
         b.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
@@ -551,7 +569,7 @@ class KeyboardViewController: UIInputViewController {
         space.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
         space.setTitleColor(.label, for: .normal)
         paint(space, normal: keyColor, pressed: keyPressedColor)
-        space.layer.cornerRadius = 10
+        space.layer.cornerRadius = 12
         space.haptic = .heavySpace
         space.isSpaceKey = true
         space.hitExpand = 8   // space "steals" a few points from its neighbours' edges
@@ -568,12 +586,6 @@ class KeyboardViewController: UIInputViewController {
         slideKeys.append(space)
         row.addArrangedSubview(space)
 
-        let period = punctKey(".")
-        period.variants = [",", "?", "!", "¿", "¡", "…"]
-        addLongPress(to: period)
-        period.widthAnchor.constraint(equalToConstant: 36).isActive = true
-        row.addArrangedSubview(period)
-
         // The buffer before Return (Brian's danger zone). V1.7: 10→4pt —
         // Brian spotted the wasted space in his own screenshot and asked
         // for a longer space bar ("todo ayuda"). A sliver stays: proximity
@@ -589,7 +601,7 @@ class KeyboardViewController: UIInputViewController {
         ret.setTitleColor(.label, for: .normal)
         paint(ret, normal: UIColor.systemTeal.withAlphaComponent(0.35),
               pressed: UIColor.systemTeal.withAlphaComponent(0.6))
-        ret.layer.cornerRadius = 10
+        ret.layer.cornerRadius = 12
         ret.haptic = .mediumReturn
         ret.widthAnchor.constraint(equalToConstant: 44).isActive = true
         ret.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
@@ -1023,7 +1035,7 @@ class KeyboardViewController: UIInputViewController {
             popupEnabled ? "👁 Popup: SÍ" : "👁 Popup: NO", #selector(popupToggleTapped)))
         panelStrip.addArrangedSubview(stripButton(
             suggEnabled ? "💡 Sugerencias: SÍ" : "💡 Sugerencias: NO", #selector(suggToggleTapped)))
-        let ver = stripButton("BrianKeys v0.2", #selector(popupToggleTapped))
+        let ver = stripButton("BrianKeys v0.3 Speed Lab", #selector(popupToggleTapped))
         ver.isEnabled = false
         panelStrip.addArrangedSubview(ver)
         panelStrip.isHidden = false
