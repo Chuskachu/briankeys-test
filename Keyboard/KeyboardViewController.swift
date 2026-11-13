@@ -132,6 +132,28 @@ class KeyboardViewController: UIInputViewController {
     /// deletes ONLY if the document's last char still equals it — the
     /// defensive fix for the "á eats the previous letter" bug.
     private var pendingBaseChar: String? = nil
+    /// v0.6: the variant strip's owner, captured in showVariants FROM
+    /// THE BUTTON ITSELF, plus the exact document character it may
+    /// replace (nil when the base char is verifiably NOT the document's
+    /// last char). variantTapped trusts ONLY this — v0.5 forensics
+    /// proved the touch-down pending state can point at the wrong key.
+    private weak var variantOwner: KeyButton?
+    private var variantExpected: String? = nil
+    /// v0.6 (Brian): slide-commit ON/OFF switch (panel). Default ON;
+    /// he wants to A/B it — his suite log had ZERO slide events and his
+    /// full log only 3 in ~2,000 taps, so the test is cheap and clean.
+    private let slidePrefKey = "bk_slide_on_v1"
+    private lazy var slideOn: Bool = UserDefaults.standard.object(forKey: slidePrefKey) as? Bool ?? true
+    /// v0.6 (Brian): personal dictionary — words he pins himself
+    /// (long-press a suggestion chip). They outrank learned words.
+    private let personalKey = "bk_personal_v1"
+    private lazy var personal: Set<String> = Set(UserDefaults.standard.stringArray(forKey: personalKey) ?? [])
+    private var wordsPage = 0
+    /// v0.6 (Brian): next-word prediction from HIS phrases — counts of
+    /// (previous word → next word), learned when a word is completed.
+    private let bigramKey = "bk_bigrams_v1"
+    private lazy var bigrams: [String: [String: Int]] = UserDefaults.standard.dictionary(forKey: bigramKey) as? [String: [String: Int]] ?? [:]
+    private var lastCompletedWord: String? = nil
     /// All keys a finger may slide-commit into on the current page.
     /// Exactly the typing keys — function keys are never in this list,
     /// which is also what makes the proximity rescue safe.
@@ -258,6 +280,11 @@ class KeyboardViewController: UIInputViewController {
             c.layer.cornerRadius = 8
             c.tag = i
             c.addTarget(self, action: #selector(chipTapped(_:)), for: .touchUpInside)
+            // v0.6: long-press a chip = pin that word as HIS (personal
+            // dictionary, top priority in future suggestions).
+            let chipLP = UILongPressGestureRecognizer(target: self, action: #selector(chipLongPressed(_:)))
+            chipLP.minimumPressDuration = 0.45
+            c.addGestureRecognizer(chipLP)
             suggestionBar.addArrangedSubview(c)
             return c
         }
@@ -426,6 +453,7 @@ class KeyboardViewController: UIInputViewController {
         b.setTitleColor(.label, for: .normal)
         paint(b, normal: keyColor, pressed: keyPressedColor)
         b.layer.cornerRadius = 12
+        outline(b)
         b.variants = variants
         b.haptic = .lightKey
         b.accessibilityLabel = char
@@ -449,6 +477,7 @@ class KeyboardViewController: UIInputViewController {
         b.setTitleColor(.label, for: .normal)
         paint(b, normal: functionKeyColor, pressed: functionPressedColor)
         b.layer.cornerRadius = 12
+        outline(b)
         b.haptic = .select
         b.addTarget(self, action: action, for: .touchUpInside)
         b.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
@@ -601,6 +630,7 @@ class KeyboardViewController: UIInputViewController {
                 b.titleLabel?.font = .systemFont(ofSize: 26)
                 b.backgroundColor = keyColor
                 b.layer.cornerRadius = 12
+                outline(b)
                 b.addTarget(self, action: #selector(emojiTouchDown(_:)), for: .touchDown)
                 b.addTarget(self, action: #selector(emojiTouchUp(_:)), for: [.touchUpOutside, .touchCancel])
                 b.addTarget(self, action: #selector(emojiTapped(_:)), for: .touchUpInside)
@@ -623,6 +653,8 @@ class KeyboardViewController: UIInputViewController {
         space.setTitleColor(.label, for: .normal)
         paint(space, normal: keyColor, pressed: keyPressedColor)
         space.layer.cornerRadius = 12
+        outline(space)
+        addFlickHint(to: space)
         space.isSpaceKey = true   // v0.5: the flick works on this bar too
         space.onFlickDown = { [weak self] in self?.spaceFlickedToEnter() }
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)
@@ -691,6 +723,7 @@ class KeyboardViewController: UIInputViewController {
         space.setTitleColor(.label, for: .normal)
         paint(space, normal: keyColor, pressed: keyPressedColor)
         space.layer.cornerRadius = 12
+        outline(space)
         space.haptic = .heavySpace
         space.isSpaceKey = true
         // v0.4: space no longer steals edge points — zero-gap tiling.
@@ -707,6 +740,7 @@ class KeyboardViewController: UIInputViewController {
         slideKeys.append(space)
         // v0.5 (Brian): flick down on the bar = Enter.
         space.onFlickDown = { [weak self] in self?.spaceFlickedToEnter() }
+        addFlickHint(to: space)   // v0.6: the hint finally ships
         row.addArrangedSubview(space)
 
         // v0.5 (Brian): THE RETURN KEY IS GONE. It was his danger zone
@@ -719,6 +753,30 @@ class KeyboardViewController: UIInputViewController {
         return row
     }
 
+    /// v0.6 (Brian): a thin dark outline on every key, so the gapless
+    /// keys stay visually distinct. NO gaps come back — it's paint,
+    /// not space. Layer-level, so the baked key images can't eat it.
+    private func outline(_ b: UIButton) {
+        b.layer.borderWidth = 1
+        b.layer.borderColor = UIColor.black.withAlphaComponent(0.55).cgColor
+    }
+
+    /// v0.6 (Brian): the ⏎↓ flick hint the v0.5 mockup promised and
+    /// the code forgot — small, at the space bar's right end.
+    private func addFlickHint(to space: KeyButton) {
+        let hint = UILabel()
+        hint.text = "⏎↓"
+        hint.font = .systemFont(ofSize: 14, weight: .semibold)
+        hint.textColor = .secondaryLabel
+        hint.isUserInteractionEnabled = false
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        space.addSubview(hint)
+        NSLayoutConstraint.activate([
+            hint.trailingAnchor.constraint(equalTo: space.trailingAnchor, constant: -12),
+            hint.centerYAnchor.constraint(equalTo: space.centerYAnchor)
+        ])
+    }
+
     // MARK: - Variants strip
 
     @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
@@ -727,6 +785,19 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func showVariants(for button: KeyButton) {
+        // v0.6: capture the strip's owner HERE, from the button itself,
+        // and work out NOW whether its base char is verifiably the
+        // document's last char. variantTapped trusts only this — never
+        // the touch-down pending state, which v0.5's log proved can
+        // point at the previous key when a touch-down goes unregistered.
+        variantOwner = button
+        variantExpected = nil
+        if let base = button.accessibilityLabel {
+            let context = textDocumentProxy.documentContextBeforeInput ?? ""
+            if let last = context.last, fold(String(last)) == fold(base) {
+                variantExpected = String(last)
+            }
+        }
         for arranged in variantStrip.arrangedSubviews {
             variantStrip.removeArrangedSubview(arranged)
             arranged.removeFromSuperview()
@@ -758,6 +829,8 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.isHidden = true
         panelStrip?.isHidden = true
         heightConstraint.constant = 315
+        variantOwner = nil
+        variantExpected = nil
     }
 
     @objc private func variantTapped(_ sender: UIButton) {
@@ -769,15 +842,21 @@ class KeyboardViewController: UIInputViewController {
         // character is exactly the base char this key inserted;
         // otherwise insert without deleting. Every outcome is logged
         // (VAR) so a recurrence is measurable instead of mysterious.
+        // v0.6: delete ONLY the strip owner's own base char, captured
+        // in showVariants and re-verified against the document right
+        // now. If the base never landed (an unregistered touch-down),
+        // expected is nil and the variant is inserted with NO delete —
+        // by construction this can never eat a neighbour's letter.
         var deleted = false
-        if pendingVariantKey != nil, let base = pendingBaseChar {
-            let context = textDocumentProxy.documentContextBeforeInput ?? ""
-            if let last = context.last, String(last) == base {
-                textDocumentProxy.deleteBackward()
-                if !localWord.isEmpty { localWord.removeLast() }
-                deleted = true
-            }
+        if variantOwner != nil, let exp = variantExpected,
+           let last = (textDocumentProxy.documentContextBeforeInput ?? "").last,
+           String(last) == exp {
+            textDocumentProxy.deleteBackward()
+            if !localWord.isEmpty { localWord.removeLast() }
+            deleted = true
         }
+        variantOwner = nil
+        variantExpected = nil
         if logEnabled {
             logEvent(k: "VAR:" + s, m: deleted ? "var-fix" : "var-keep",
                      viewPoint: .zero, frame: nil)
@@ -829,6 +908,7 @@ class KeyboardViewController: UIInputViewController {
             // haptics are space-only now. The corrector is parked anyway.)
         }
         learn(final)
+        noteCompleted(final)   // v0.6: feed the bigram counts
     }
 
     /// The prudent judge. Returns the ONE acceptable correction for a
@@ -923,8 +1003,20 @@ class KeyboardViewController: UIInputViewController {
 
     private func computeSuggestions(for prefix: String) -> [String] {
         if prefix.isEmpty {
-            // No word in progress: offer his most-used learned words.
-            return learned.sorted { $0.value > $1.value }.prefix(3).map { $0.key }
+            // No word in progress: v0.6 — first, what HIS phrases say
+            // comes next (bigrams); then his most-used learned words.
+            var out: [String] = []
+            if let prev = lastCompletedWord?.lowercased(),
+               let followers = bigrams[prev] {
+                out += followers.sorted { $0.value > $1.value }.prefix(3).map { $0.key }
+            }
+            if out.count < 3 {
+                for w in learned.sorted { $0.value > $1.value } where !out.contains(w.key) {
+                    out.append(w.key)
+                    if out.count == 3 { break }
+                }
+            }
+            return out
         }
         let fp = fold(prefix)
         var out: [String] = []
@@ -937,6 +1029,12 @@ class KeyboardViewController: UIInputViewController {
         }
         for (i, seed) in seedWords.enumerated() where foldedSeeds[i].hasPrefix(fp) {
             offer(seed)
+            if out.count == 3 { return out }
+        }
+        // v0.6: his pinned personal words outrank merely-learned ones.
+        for w in personal.sorted { (learned[$0] ?? 0) > (learned[$1] ?? 0) }
+        where fold(w).hasPrefix(fp) {
+            offer(w)
             if out.count == 3 { return out }
         }
         let learnedMatches = learned
@@ -994,10 +1092,138 @@ class KeyboardViewController: UIInputViewController {
         }
         textDocumentProxy.insertText(word)
         learn(word)
+        noteCompleted(word)   // v0.6: a tapped chip also completes a word
         textDocumentProxy.insertText(" ")
         lastSpaceAt = nil
         autoShiftIfNeeded()
         updateSuggestions()
+    }
+
+    // MARK: - v0.6: bigrams, personal dictionary, words manager
+
+    /// A word was completed: count the pair (previous → this) so the
+    /// bar can predict HIS next word, and remember it as the previous.
+    private func noteCompleted(_ word: String) {
+        if let prev = lastCompletedWord?.lowercased(), !prev.isEmpty,
+           prev != word.lowercased() {
+            var followers = bigrams[prev] ?? [:]
+            followers[word, default: 0] += 1
+            bigrams[prev] = followers
+            if bigrams.count > 900 {   // prune one-hit wonders
+                bigrams = bigrams.filter { $0.value.values.reduce(0, +) > 1 }
+            }
+            UserDefaults.standard.set(bigrams, forKey: bigramKey)
+        }
+        lastCompletedWord = word
+    }
+
+    /// Long-press on a suggestion chip: pin the word as personal.
+    @objc private func chipLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began,
+              let chip = gesture.view as? UIButton,
+              chip.tag < currentSuggestions.count else { return }
+        let word = currentSuggestions[chip.tag]
+        personal.insert(word)
+        UserDefaults.standard.set(Array(personal), forKey: personalKey)
+        if logEnabled { logEvent(k: "CFG", m: "pin-word", viewPoint: .zero, frame: nil) }
+        chip.setTitle("📌 " + word, for: .normal)
+        NSObject.cancelPreviousPerformRequests(withTarget: self,
+                                               selector: #selector(refreshBar),
+                                               object: nil)
+        perform(#selector(refreshBar), with: nil, afterDelay: 1.0)
+    }
+
+    /// Every word the keyboard treats as his: pinned first, then
+    /// learned by frequency.
+    private func allPersonalWords() -> [String] {
+        var set = Set(learned.keys)
+        set.formUnion(personal)
+        return set.sorted { a, b in
+            let pa = personal.contains(a) ? 1 : 0
+            let pb = personal.contains(b) ? 1 : 0
+            if pa != pb { return pa > pb }
+            return (learned[a] ?? 0) > (learned[b] ?? 0)
+        }
+    }
+
+    @objc private func wordsPanelTapped() {
+        wordsPage = 0
+        showWordsPanel()
+    }
+
+    /// The words manager, inside the panel strips: a page of his words
+    /// (tap one to DELETE it — that's how a badly-learned word dies)
+    /// plus page navigation. Pinning happens by long-pressing a chip.
+    private func showWordsPanel() {
+        let words = allPersonalWords()
+        let pageSize = 5
+        let pages = max(1, (words.count + pageSize - 1) / pageSize)
+        wordsPage = min(max(wordsPage, 0), pages - 1)
+        for arranged in variantStrip.arrangedSubviews {
+            variantStrip.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        if words.isEmpty {
+            let b = stripButton("(sin palabras todavía)", #selector(wordsPanelTapped))
+            b.isEnabled = false
+            variantStrip.addArrangedSubview(b)
+        } else {
+            for (i, w) in words.enumerated()
+            where i >= wordsPage * pageSize && i < wordsPage * pageSize + pageSize {
+                let b = stripButton((personal.contains(w) ? "📌 " : "") + w,
+                                    #selector(wordChipTapped(_:)))
+                b.tag = i
+                variantStrip.addArrangedSubview(b)
+            }
+        }
+        let close = UIButton(type: .system)
+        close.setTitle("✕", for: .normal)
+        close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
+        close.setTitleColor(.label, for: .normal)
+        close.backgroundColor = .tertiarySystemBackground
+        close.layer.cornerRadius = 8
+        close.addTarget(self, action: #selector(hideVariants), for: .touchUpInside)
+        variantStrip.addArrangedSubview(close)
+        for arranged in panelStrip.arrangedSubviews {
+            panelStrip.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        panelStrip.addArrangedSubview(stripButton("⬅", #selector(wordsPrevTapped)))
+        let info = stripButton("Página \(wordsPage + 1)/\(pages) — toca una palabra para borrarla",
+                                #selector(wordsPanelTapped))
+        info.isEnabled = false
+        panelStrip.addArrangedSubview(info)
+        panelStrip.addArrangedSubview(stripButton("➡", #selector(wordsNextTapped)))
+        panelStrip.isHidden = false
+        variantStrip.isHidden = false
+        heightConstraint.constant = 421
+    }
+
+    @objc private func wordsPrevTapped() {
+        let pages = max(1, (allPersonalWords().count + 4) / 5)
+        wordsPage = (wordsPage - 1 + pages) % pages
+        showWordsPanel()
+    }
+
+    @objc private func wordsNextTapped() {
+        let pages = max(1, (allPersonalWords().count + 4) / 5)
+        wordsPage = (wordsPage + 1) % pages
+        showWordsPanel()
+    }
+
+    @objc private func wordChipTapped(_ sender: UIButton) {
+        let words = allPersonalWords()
+        guard sender.tag < words.count else { return }
+        let w = words[sender.tag]
+        learned[w] = nil
+        learnedFolded[w] = nil
+        UserDefaults.standard.set(learned, forKey: learnedKey)
+        if personal.contains(w) {
+            personal.remove(w)
+            UserDefaults.standard.set(Array(personal), forKey: personalKey)
+        }
+        if logEnabled { logEvent(k: "CFG", m: "word-del", viewPoint: .zero, frame: nil) }
+        showWordsPanel()
     }
 
     // MARK: - Touch logger (V1.9 — Brian's idea, 2026-11-12)
@@ -1140,6 +1366,7 @@ class KeyboardViewController: UIInputViewController {
             logEnabled ? "⏺ Grabando SÍ" : "⏺ Grabar NO", #selector(logToggleTapped)))
         variantStrip.addArrangedSubview(stripButton("📋 Copiar (\(logCount))", #selector(logCopyTapped)))
         variantStrip.addArrangedSubview(stripButton("🗑 Borrar", #selector(logClearTapped)))
+        variantStrip.addArrangedSubview(stripButton("📖 Palabras", #selector(wordsPanelTapped)))
         let close = UIButton(type: .system)
         close.setTitle("✕", for: .normal)
         close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
@@ -1160,7 +1387,9 @@ class KeyboardViewController: UIInputViewController {
             popupEnabled ? "👁 Popup: SÍ" : "👁 Popup: NO", #selector(popupToggleTapped)))
         panelStrip.addArrangedSubview(stripButton(
             suggEnabled ? "💡 Suger: SÍ" : "💡 Suger: NO", #selector(suggToggleTapped)))
-        let ver = stripButton("BrianKeys v0.5 Speed Lab", #selector(popupToggleTapped))
+        panelStrip.addArrangedSubview(stripButton(
+            slideOn ? "🧩 Slide: SÍ" : "🧩 Slide: NO", #selector(slideToggleTapped)))
+        let ver = stripButton("BrianKeys v0.6 Speed Lab", #selector(popupToggleTapped))
         ver.isEnabled = false
         panelStrip.addArrangedSubview(ver)
         panelStrip.isHidden = false
@@ -1173,6 +1402,13 @@ class KeyboardViewController: UIInputViewController {
         UserDefaults.standard.set(popupEnabled, forKey: popupKey)
         if !popupEnabled { hidePopup() }
         if logEnabled { logEvent(k: "CFG", m: popupEnabled ? "popup-on" : "popup-off", viewPoint: .zero, frame: nil) }
+        showLogPanel()
+    }
+
+    @objc private func slideToggleTapped() {
+        slideOn.toggle()
+        UserDefaults.standard.set(slideOn, forKey: slidePrefKey)
+        if logEnabled { logEvent(k: "CFG", m: slideOn ? "slide-on" : "slide-off", viewPoint: .zero, frame: nil) }
         showLogPanel()
     }
 
@@ -1355,6 +1591,7 @@ class KeyboardViewController: UIInputViewController {
     /// A drag (or a rescued gap touch) entered this key — type it as if
     /// tapped. Only typing keys are ever passed here.
     private func slideCommit(_ target: KeyButton, windowPoint: CGPoint, via: String) {
+        guard slideOn else { return }   // v0.6: Brian's A/B switch (panel)
         guard variantStrip == nil || variantStrip.isHidden else { return }
         if logEnabled {
             logEvent(k: keyLabel(target), m: via,
@@ -1454,6 +1691,7 @@ class KeyboardViewController: UIInputViewController {
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4
         completeWord()
         localWord = ""
+        lastCompletedWord = nil   // v0.6: a new line starts a new phrase
         textDocumentProxy.insertText("\n")
         updateSuggestions()
     }
