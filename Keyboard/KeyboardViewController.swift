@@ -144,15 +144,23 @@ class KeyboardViewController: UIInputViewController {
     /// full log only 3 in ~2,000 taps, so the test is cheap and clean.
     private let slidePrefKey = "bk_slide_on_v1"
     private lazy var slideOn: Bool = UserDefaults.standard.object(forKey: slidePrefKey) as? Bool ?? true
+    /// v0.8 (Brian): his words live in ONE drawer shared between the
+    /// app and the keyboard (App Groups), so he can add and delete
+    /// words from inside the app and the keyboard just uses that list.
+    /// Under SideStore the sharing is a HYPOTHESIS until he tests it
+    /// on the phone; if the shared drawer cannot be opened, wordStore
+    /// falls back to the keyboard's own drawer and nothing changes.
+    static let appGroupID = "group.com.brianklauer.briankeys"
+    lazy var wordStore: UserDefaults = UserDefaults(suiteName: KeyboardViewController.appGroupID) ?? .standard
     /// v0.6 (Brian): personal dictionary — words he pins himself
     /// (long-press a suggestion chip). They outrank learned words.
     private let personalKey = "bk_personal_v1"
-    private lazy var personal: Set<String> = Set(UserDefaults.standard.stringArray(forKey: personalKey) ?? [])
+    private lazy var personal: Set<String> = Set(wordStore.stringArray(forKey: personalKey) ?? [])
     private var wordsPage = 0
     /// v0.6 (Brian): next-word prediction from HIS phrases — counts of
     /// (previous word → next word), learned when a word is completed.
     private let bigramKey = "bk_bigrams_v1"
-    private lazy var bigrams: [String: [String: Int]] = UserDefaults.standard.dictionary(forKey: bigramKey) as? [String: [String: Int]] ?? [:]
+    private lazy var bigrams: [String: [String: Int]] = wordStore.dictionary(forKey: bigramKey) as? [String: [String: Int]] ?? [:]
     private var lastCompletedWord: String? = nil
     /// All keys a finger may slide-commit into on the current page.
     /// Exactly the typing keys — function keys are never in this list,
@@ -194,7 +202,7 @@ class KeyboardViewController: UIInputViewController {
                              "pelucha", "Pelusa", "kakachon"]
     private let learnedKey = "bk_learned_v1"
     private lazy var learned: [String: Int] = {
-        UserDefaults.standard.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
+        wordStore.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
     }()
     /// Accent-folded forms of the learned words, cached (v0.2 diet).
     private var learnedFolded: [String: String] = [:]
@@ -224,10 +232,35 @@ class KeyboardViewController: UIInputViewController {
         s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
     }
 
+    /// v0.8: the first time the shared drawer opens, carry his existing
+    /// words (personal + learned + bigrams) over from the keyboard's
+    /// own drawer. Runs once; from then on the app and the keyboard
+    /// read and write the same drawer.
+    private func migrateWordsToSharedDrawer() {
+        guard let shared = UserDefaults(suiteName: KeyboardViewController.appGroupID) else { return }
+        let local = UserDefaults.standard
+        if shared.object(forKey: "bk_migrated_v08") == nil {
+            if shared.stringArray(forKey: personalKey) == nil,
+               let mine = local.stringArray(forKey: personalKey) {
+                shared.set(mine, forKey: personalKey)
+            }
+            if shared.dictionary(forKey: learnedKey) == nil,
+               let mine = local.dictionary(forKey: learnedKey) {
+                shared.set(mine, forKey: learnedKey)
+            }
+            if shared.dictionary(forKey: bigramKey) == nil,
+               let mine = local.dictionary(forKey: bigramKey) {
+                shared.set(mine, forKey: bigramKey)
+            }
+            shared.set(true, forKey: "bk_migrated_v08")
+        }
+    }
+
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        migrateWordsToSharedDrawer()   // v0.8: before anything reads his words
         hapticHeavy.prepare()
         // Seed the folded-form cache for learned words (v0.2 diet:
         // computeSuggestions used to re-fold every learned word on
@@ -890,7 +923,7 @@ class KeyboardViewController: UIInputViewController {
                 learned.sorted { $0.value > $1.value }.prefix(400).map { ($0.key, $0.value) })
             learnedFolded = Dictionary(uniqueKeysWithValues: learned.keys.map { ($0, fold($0)) })
         }
-        UserDefaults.standard.set(learned, forKey: learnedKey)
+        wordStore.set(learned, forKey: learnedKey)
     }
 
     /// A word was just completed (space / punctuation / return): first
@@ -1113,7 +1146,7 @@ class KeyboardViewController: UIInputViewController {
             if bigrams.count > 900 {   // prune one-hit wonders
                 bigrams = bigrams.filter { $0.value.values.reduce(0, +) > 1 }
             }
-            UserDefaults.standard.set(bigrams, forKey: bigramKey)
+            wordStore.set(bigrams, forKey: bigramKey)
         }
         lastCompletedWord = word
     }
@@ -1125,7 +1158,7 @@ class KeyboardViewController: UIInputViewController {
               chip.tag < currentSuggestions.count else { return }
         let word = currentSuggestions[chip.tag]
         personal.insert(word)
-        UserDefaults.standard.set(Array(personal), forKey: personalKey)
+        wordStore.set(Array(personal), forKey: personalKey)
         if logEnabled { logEvent(k: "CFG", m: "pin-word", viewPoint: .zero, frame: nil) }
         chip.setTitle("📌 " + word, for: .normal)
         NSObject.cancelPreviousPerformRequests(withTarget: self,
@@ -1218,10 +1251,10 @@ class KeyboardViewController: UIInputViewController {
         let w = words[sender.tag]
         learned[w] = nil
         learnedFolded[w] = nil
-        UserDefaults.standard.set(learned, forKey: learnedKey)
+        wordStore.set(learned, forKey: learnedKey)
         if personal.contains(w) {
             personal.remove(w)
-            UserDefaults.standard.set(Array(personal), forKey: personalKey)
+            wordStore.set(Array(personal), forKey: personalKey)
         }
         if logEnabled { logEvent(k: "CFG", m: "word-del", viewPoint: .zero, frame: nil) }
         showWordsPanel()
@@ -1390,7 +1423,7 @@ class KeyboardViewController: UIInputViewController {
             suggEnabled ? "💡 Suger: SÍ" : "💡 Suger: NO", #selector(suggToggleTapped)))
         panelStrip.addArrangedSubview(stripButton(
             slideOn ? "🧩 Slide: SÍ" : "🧩 Slide: NO", #selector(slideToggleTapped)))
-        let ver = stripButton("BrianKeys v0.7 Speed Lab", #selector(popupToggleTapped))
+        let ver = stripButton("BrianKeys v0.8 Speed Lab", #selector(popupToggleTapped))
         ver.isEnabled = false
         panelStrip.addArrangedSubview(ver)
         panelStrip.isHidden = false

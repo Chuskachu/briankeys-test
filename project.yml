@@ -13,6 +13,11 @@ targets:
   BrianKeysTest:
     type: application
     platform: iOS
+    entitlements:
+      path: App/BrianKeysApp.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.brianklauer.briankeys
     sources:
       - App
     info:
@@ -33,6 +38,11 @@ targets:
   BrianKeysKeyboard:
     type: app-extension
     platform: iOS
+    entitlements:
+      path: Keyboard/BrianKeysKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.brianklauer.briankeys
     sources:
       - Keyboard
     info:
