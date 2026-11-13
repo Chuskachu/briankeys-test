@@ -1093,8 +1093,9 @@ class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(word)
         learn(word)
         noteCompleted(word)   // v0.6: a tapped chip also completes a word
-        textDocumentProxy.insertText(" ")
-        lastSpaceAt = nil
+        // v0.7 (Brian): NO trailing space after a chip — it left a space
+        // before any punctuation typed next ("palabra ,"). He adds the
+        // space himself when he wants one.
         autoShiftIfNeeded()
         updateSuggestions()
     }
@@ -1389,7 +1390,7 @@ class KeyboardViewController: UIInputViewController {
             suggEnabled ? "💡 Suger: SÍ" : "💡 Suger: NO", #selector(suggToggleTapped)))
         panelStrip.addArrangedSubview(stripButton(
             slideOn ? "🧩 Slide: SÍ" : "🧩 Slide: NO", #selector(slideToggleTapped)))
-        let ver = stripButton("BrianKeys v0.6 Speed Lab", #selector(popupToggleTapped))
+        let ver = stripButton("BrianKeys v0.7 Speed Lab", #selector(popupToggleTapped))
         ver.isEnabled = false
         panelStrip.addArrangedSubview(ver)
         panelStrip.isHidden = false
