@@ -49,6 +49,9 @@ private class KeyButton: UIButton {
     // Function keys are never slide targets: a glide must not delete or
     // submit by accident.
     static var slideTargets: [KeyButton] = []
+    /// v0.9: a space-bar trackpad session is walking the cursor (set
+    /// by the VC); while it runs, touches must not flick or slide.
+    static var trackpadMode = false
     /// v0.2: window frames cached at layout time (see touchesMoved).
     static var frameCache: [ObjectIdentifier: CGRect] = [:]
     var slideEnabled = false
@@ -79,6 +82,9 @@ private class KeyButton: UIButton {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
+        // v0.9: during a trackpad session the finger's travel moves the
+        // cursor — it must not flick an Enter or slide-commit letters.
+        if KeyButton.trackpadMode { return }
         // v0.5 flick check first: it must work even where slide is off
         // (the emoji page's space bar has no slide machinery).
         if isSpaceKey, !flickFired, let startY = touchStartY, let t = touches.first,
@@ -143,7 +149,7 @@ class KeyboardViewController: UIInputViewController {
     /// he wants to A/B it — his suite log had ZERO slide events and his
     /// full log only 3 in ~2,000 taps, so the test is cheap and clean.
     private let slidePrefKey = "bk_slide_on_v1"
-    private lazy var slideOn: Bool = UserDefaults.standard.object(forKey: slidePrefKey) as? Bool ?? true
+    private lazy var slideOn: Bool = settingBool(slidePrefKey, default: true)
     /// v0.8 (Brian): his words live in ONE drawer shared between the
     /// app and the keyboard (App Groups), so he can add and delete
     /// words from inside the app and the keyboard just uses that list.
@@ -152,6 +158,22 @@ class KeyboardViewController: UIInputViewController {
     /// falls back to the keyboard's own drawer and nothing changes.
     static let appGroupID = "group.com.brianklauer.briankeys"
     lazy var wordStore: UserDefaults = UserDefaults(suiteName: KeyboardViewController.appGroupID) ?? .standard
+    /// v0.9 (Brian): his switches live in the APP now (Opciones page)
+    /// and travel through the same shared drawer as his words. The
+    /// keyboard reads shared-first, local-second: a switch he flips in
+    /// the app wins, and if the drawer does not survive SideStore his
+    /// last in-keyboard values still apply.
+    func settingBool(_ key: String, default def: Bool) -> Bool {
+        if let v = wordStore.object(forKey: key) as? Bool { return v }
+        if let v = UserDefaults.standard.object(forKey: key) as? Bool { return v }
+        return def
+    }
+    private func refreshSettings() {
+        prudentEnabled = settingBool(prudentKey, default: false)
+        popupEnabled = settingBool(popupKey, default: true)
+        suggEnabled = settingBool(suggKey, default: true)
+        slideOn = settingBool(slidePrefKey, default: true)
+    }
     /// v0.6 (Brian): personal dictionary — words he pins himself
     /// (long-press a suggestion chip). They outrank learned words.
     private let personalKey = "bk_personal_v1"
@@ -162,6 +184,13 @@ class KeyboardViewController: UIInputViewController {
     private let bigramKey = "bk_bigrams_v1"
     private lazy var bigrams: [String: [String: Int]] = wordStore.dictionary(forKey: bigramKey) as? [String: [String: Int]] ?? [:]
     private var lastCompletedWord: String? = nil
+    /// v0.9 (Brian): ONE active language — the bilingual bar confused
+    /// him the same way Apple's did ("over" offered before "ocurre").
+    /// Spanish by default; he flips it in the 123 panel when he wants
+    /// English. His own words (seeds, pinned, learned) always apply.
+    private let langKey = "bk_lang_v1"
+    private lazy var lang: String = wordStore.string(forKey: langKey)
+        ?? UserDefaults.standard.string(forKey: langKey) ?? "es"
     /// All keys a finger may slide-commit into on the current page.
     /// Exactly the typing keys — function keys are never in this list,
     /// which is also what makes the proximity rescue safe.
@@ -221,7 +250,7 @@ class KeyboardViewController: UIInputViewController {
     // Every fix announces itself with a soft double-tick haptic so he can
     // FEEL the keyboard act — transparency he can notice, never silent.
     private let prudentKey = "bk_prudent_v1"
-    private lazy var prudentEnabled: Bool = UserDefaults.standard.bool(forKey: prudentKey)
+    private lazy var prudentEnabled: Bool = settingBool(prudentKey, default: false)
     private lazy var foldedESSet: Set<String> = Set(foldedES)
     private lazy var foldedENSet: Set<String> = Set(foldedEN)
     private lazy var foldedES: [String] = WordLists.es.map { fold($0) }
@@ -261,6 +290,7 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         migrateWordsToSharedDrawer()   // v0.8: before anything reads his words
+        refreshSettings()   // v0.9: his switches, as last set in the app
         hapticHeavy.prepare()
         // Seed the folded-form cache for learned words (v0.2 diet:
         // computeSuggestions used to re-fold every learned word on
@@ -325,6 +355,11 @@ class KeyboardViewController: UIInputViewController {
         buildKeyboard()
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        refreshSettings()   // v0.9: pick up switches he flipped in the app
+    }
+
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         autoShiftIfNeeded()
@@ -382,7 +417,7 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.distribution = .fillEqually
         variantStrip.spacing = 5
         variantStrip.isHidden = true
-        variantStrip.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        variantStrip.heightAnchor.constraint(equalToConstant: 40).isActive = true
         mainStack.addArrangedSubview(variantStrip)
 
         // Second strip (hidden unless the log panel is open, v0.2).
@@ -391,7 +426,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.distribution = .fillEqually
         panelStrip.spacing = 5
         panelStrip.isHidden = true
-        panelStrip.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        panelStrip.heightAnchor.constraint(equalToConstant: 40).isActive = true
         mainStack.addArrangedSubview(panelStrip)
 
         switch mode {
@@ -691,6 +726,10 @@ class KeyboardViewController: UIInputViewController {
         space.isSpaceKey = true   // v0.5: the flick works on this bar too
         space.onFlickDown = { [weak self] in self?.spaceFlickedToEnter() }
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)
+        // v0.9: the trackpad lives on this bar too.
+        let spaceLP = UILongPressGestureRecognizer(target: self, action: #selector(spaceLongPressed(_:)))
+        spaceLP.minimumPressDuration = 0.4
+        space.addGestureRecognizer(spaceLP)
         row.addArrangedSubview(space)
         let del = functionKey("⌫", action: #selector(deleteTapped))
         del.widthAnchor.constraint(equalToConstant: 64).isActive = true
@@ -762,7 +801,8 @@ class KeyboardViewController: UIInputViewController {
         // v0.4: space no longer steals edge points — zero-gap tiling.
         space.addTarget(self, action: #selector(spaceTapped), for: .touchDown)   // commit on contact, like the letters
         space.addTarget(self, action: #selector(keyTouchedDown(_:)), for: .touchDown)
-        // V1.8: long-press space = the prudent corrector's ON/OFF switch.
+        // v0.9: long-press space = trackpad (walk the cursor). The
+        // corrector's switch moved to the app's Opciones page.
         let spaceLP = UILongPressGestureRecognizer(target: self, action: #selector(spaceLongPressed(_:)))
         spaceLP.minimumPressDuration = 0.4
         space.addGestureRecognizer(spaceLP)
@@ -781,7 +821,7 @@ class KeyboardViewController: UIInputViewController {
         // delete); now the space bar runs to the right edge — where his
         // thumb lands anyway — and Enter lives in the downward flick on
         // the bar (see spaceFlickedToEnter). Flick only, no long-press
-        // Enter: the long-press keeps its corrector-toggle job.
+        // Enter: the long-press is the trackpad now (v0.9).
 
         return row
     }
@@ -838,7 +878,7 @@ class KeyboardViewController: UIInputViewController {
         for variant in button.variants {
             let vb = UIButton(type: .system)
             vb.setTitle(variant, for: .normal)
-            vb.titleLabel?.font = .systemFont(ofSize: 22, weight: .semibold)
+            vb.titleLabel?.font = .systemFont(ofSize: 19, weight: .semibold)
             vb.setTitleColor(.label, for: .normal)
             vb.backgroundColor = .systemOrange.withAlphaComponent(0.30)
             vb.layer.cornerRadius = 8
@@ -855,7 +895,7 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.addArrangedSubview(close)
         panelStrip.isHidden = true
         variantStrip.isHidden = false
-        heightConstraint.constant = 368
+        heightConstraint.constant = 362
     }
 
     @objc private func hideVariants() {
@@ -969,8 +1009,10 @@ class KeyboardViewController: UIInputViewController {
         }
         for (i, seed) in seedWords.enumerated() { consider(seed, foldedSeeds[i]) }
         for (surface, _) in learned { consider(surface, fold(surface)) }
-        for i in 0..<min(1200, WordLists.es.count) { consider(WordLists.es[i], foldedES[i]) }
-        for i in 0..<min(1200, WordLists.en.count) { consider(WordLists.en[i], foldedEN[i]) }
+        // v0.9: fixes are drawn from the ACTIVE language only.
+        let pool = lang == "en" ? WordLists.en : WordLists.es
+        let poolFolded = lang == "en" ? foldedEN : foldedES
+        for i in 0..<min(1200, pool.count) { consider(pool[i], poolFolded[i]) }
         if candidates.contains("\u{0}EXACT") { return nil }
         // Act only on a UNIQUE candidate — two plausible fixes = no fix.
         let unique = Array(Set(candidates))
@@ -1016,20 +1058,56 @@ class KeyboardViewController: UIInputViewController {
         localWord = fixed
     }
 
-    /// Long-press on space: the prudent corrector's switch + a flash in
-    /// the bar so he SEES the state change.
+    // MARK: - v0.9: space-bar trackpad (Brian)
+
+    /// Long-press on space = trackpad: hold the bar and drag sideways
+    /// to walk the cursor letter by letter through text already
+    /// written — the iPhone gesture he loves. This REPLACES the
+    /// prudent corrector's switch, which moved to the app's Opciones
+    /// page (his call: the long-press is ONLY the cursor now).
+    private var trackpadLastX: CGFloat = 0
+    private var trackpadRemainder: CGFloat = 0
+
     @objc private func spaceLongPressed(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began else { return }
-        prudentEnabled.toggle()
-        UserDefaults.standard.set(prudentEnabled, forKey: prudentKey)
-        chips[0].setTitle("Corrección prudente", for: .normal)
-        chips[1].setTitle(prudentEnabled ? "ACTIVADA ✓" : "apagada", for: .normal)
-        chips[2].setTitle("", for: .normal)
-        for c in chips { c.isEnabled = false; c.alpha = 1 }
-        NSObject.cancelPreviousPerformRequests(withTarget: self,
-                                               selector: #selector(refreshBar),
-                                               object: nil)
-        perform(#selector(refreshBar), with: nil, afterDelay: 1.4)
+        guard let bar = gesture.view else { return }
+        switch gesture.state {
+        case .began:
+            KeyButton.trackpadMode = true
+            trackpadLastX = gesture.location(in: bar).x
+            trackpadRemainder = 0
+            // The bar commits its space on touch-down, before this
+            // gesture is even recognised. If THIS touch just typed that
+            // trailing space, take it back so the walk starts where
+            // his text actually ended. A ". " from a double-space is a
+            // sentence end — never half-eaten.
+            if let last = lastSpaceAt, Date().timeIntervalSince(last) < 1.2 {
+                let ctx = textDocumentProxy.documentContextBeforeInput ?? ""
+                if ctx.hasSuffix(" "), !ctx.hasSuffix(". ") {
+                    textDocumentProxy.deleteBackward()
+                    lastSpaceAt = nil
+                    localWord = currentWord()
+                }
+            }
+            flashBar("Cursor ↔", "arrastra")
+        case .changed:
+            let x = gesture.location(in: bar).x
+            trackpadRemainder += x - trackpadLastX
+            trackpadLastX = x
+            let step: CGFloat = 9   // points of drag per letter walked
+            while trackpadRemainder >= step {
+                textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
+                trackpadRemainder -= step
+            }
+            while trackpadRemainder <= -step {
+                textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
+                trackpadRemainder += step
+            }
+        case .ended, .cancelled, .failed:
+            KeyButton.trackpadMode = false
+            updateSuggestions()
+        default:
+            break
+        }
     }
 
     @objc private func refreshBar() { updateSuggestions() }
@@ -1053,11 +1131,20 @@ class KeyboardViewController: UIInputViewController {
         }
         let fp = fold(prefix)
         var out: [String] = []
-        var seen = Set<String>()
+        var seenAt: [String: Int] = [:]
+        func accented(_ s: String) -> Bool {
+            s.folding(options: .diacriticInsensitive, locale: nil) != s
+        }
         func offer(_ surface: String) {
             let f = fold(surface)
-            guard !seen.contains(f) else { return }
-            seen.insert(f)
+            if let idx = seenAt[f] {
+                // v0.9 (Brian): the accented twin wins. His learned
+                // unaccented "mas" used to shadow the dictionary's
+                // "más" — now the form WITH the tilde replaces it.
+                if !accented(out[idx]), accented(surface) { out[idx] = surface }
+                return
+            }
+            seenAt[f] = out.count
             out.append(surface)
         }
         for (i, seed) in seedWords.enumerated() where foldedSeeds[i].hasPrefix(fp) {
@@ -1077,15 +1164,21 @@ class KeyboardViewController: UIInputViewController {
             offer(m.key)
             if out.count == 3 { return out }
         }
-        for (i, w) in WordLists.es.enumerated() where foldedES[i].hasPrefix(fp) {
-            offer(w)
-            if out.count == 3 { return out }
-        }
-        for (i, w) in WordLists.en.enumerated() where foldedEN[i].hasPrefix(fp) {
+        // v0.9 (Brian): ONE dictionary — the active language's.
+        let dictWords = lang == "en" ? WordLists.en : WordLists.es
+        let dictFolded = lang == "en" ? foldedEN : foldedES
+        for (i, w) in dictWords.enumerated() where dictFolded[i].hasPrefix(fp) {
             offer(w)
             if out.count == 3 { return out }
         }
         return out
+    }
+
+    /// v0.9 (Brian): a chip shows the word AS IT WILL BE INSERTED —
+    /// capitalised at a sentence start (Shift on), plain mid-sentence.
+    private func displayForm(_ w: String) -> String {
+        guard shift != .off, let f = w.first else { return w }
+        return f.uppercased() + w.dropFirst()
     }
 
     private func updateSuggestions() {
@@ -1102,7 +1195,7 @@ class KeyboardViewController: UIInputViewController {
         currentSuggestions = computeSuggestions(for: localWord)
         for (i, chip) in chips.enumerated() {
             if i < currentSuggestions.count {
-                chip.setTitle(currentSuggestions[i], for: .normal)
+                chip.setTitle(displayForm(currentSuggestions[i]), for: .normal)
                 chip.isEnabled = true
                 chip.alpha = 1
             } else {
@@ -1280,8 +1373,8 @@ class KeyboardViewController: UIInputViewController {
     // Brian flips them to isolate what each feature costs at speed.
     private let popupKey = "bk_popup_v1"
     private let suggKey = "bk_sugg_v1"
-    private lazy var popupEnabled: Bool = UserDefaults.standard.object(forKey: popupKey) as? Bool ?? true
-    private lazy var suggEnabled: Bool = UserDefaults.standard.object(forKey: suggKey) as? Bool ?? true
+    private lazy var popupEnabled: Bool = settingBool(popupKey, default: true)
+    private lazy var suggEnabled: Bool = settingBool(suggKey, default: true)
     private var logHandle: FileHandle?
     private var logOpened = false
     private var logCount = 0
@@ -1400,7 +1493,8 @@ class KeyboardViewController: UIInputViewController {
             logEnabled ? "⏺ Grabando SÍ" : "⏺ Grabar NO", #selector(logToggleTapped)))
         variantStrip.addArrangedSubview(stripButton("📋 Copiar (\(logCount))", #selector(logCopyTapped)))
         variantStrip.addArrangedSubview(stripButton("🗑 Borrar", #selector(logClearTapped)))
-        variantStrip.addArrangedSubview(stripButton("📖 Palabras", #selector(wordsPanelTapped)))
+        variantStrip.addArrangedSubview(stripButton(
+            lang == "en" ? "🌐 EN" : "🌐 ES", #selector(langToggleTapped)))
         let close = UIButton(type: .system)
         close.setTitle("✕", for: .normal)
         close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
@@ -1410,25 +1504,13 @@ class KeyboardViewController: UIInputViewController {
         close.addTarget(self, action: #selector(hideVariants), for: .touchUpInside)
         variantStrip.addArrangedSubview(close)
 
-        // Strip 2 (v0.2 Speed Lab): popup + suggestions toggles and the
-        // version tag. Toggling writes a CFG marker into the log (when
-        // recording) so one suite run stays segmented by configuration.
-        for arranged in panelStrip.arrangedSubviews {
-            panelStrip.removeArrangedSubview(arranged)
-            arranged.removeFromSuperview()
-        }
-        panelStrip.addArrangedSubview(stripButton(
-            popupEnabled ? "👁 Popup: SÍ" : "👁 Popup: NO", #selector(popupToggleTapped)))
-        panelStrip.addArrangedSubview(stripButton(
-            suggEnabled ? "💡 Suger: SÍ" : "💡 Suger: NO", #selector(suggToggleTapped)))
-        panelStrip.addArrangedSubview(stripButton(
-            slideOn ? "🧩 Slide: SÍ" : "🧩 Slide: NO", #selector(slideToggleTapped)))
-        let ver = stripButton("BrianKeys v0.8 Speed Lab", #selector(popupToggleTapped))
-        ver.isEnabled = false
-        panelStrip.addArrangedSubview(ver)
-        panelStrip.isHidden = false
+        // v0.9 (Brian): NO second strip any more. The switches (Popup,
+        // Suger, Slide, corrector) live in the app's Opciones page now;
+        // this panel keeps only the log tools and the language flip.
+        panelStrip.isHidden = true
         variantStrip.isHidden = false
-        heightConstraint.constant = 421
+        heightConstraint.constant = 362
+        flashBar("BrianKeys v0.9 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1452,6 +1534,16 @@ class KeyboardViewController: UIInputViewController {
         if logEnabled { logEvent(k: "CFG", m: suggEnabled ? "sugg-on" : "sugg-off", viewPoint: .zero, frame: nil) }
         updateSuggestions()
         showLogPanel()
+    }
+
+    /// v0.9 (Brian): the panel's one surviving switch — the language.
+    @objc private func langToggleTapped() {
+        lang = (lang == "es") ? "en" : "es"
+        wordStore.set(lang, forKey: langKey)
+        UserDefaults.standard.set(lang, forKey: langKey)
+        if logEnabled { logEvent(k: "CFG", m: lang == "en" ? "lang-en" : "lang-es", viewPoint: .zero, frame: nil) }
+        updateSuggestions()
+        showLogPanel()   // rebuild so the label shows the new language
     }
 
     @objc private func logToggleTapped() {

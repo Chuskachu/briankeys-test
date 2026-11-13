@@ -20,6 +20,55 @@ private let testTexts: [String] = [
 // add a word here, then see if the keyboard suggests it.
 private let appGroupID = "group.com.brianklauer.briankeys"
 private let personalKey = "bk_personal_v1"
+// v0.9 (Brian): the keyboard's switches live HERE now, not in the
+// keyboard's panel. Same keys the keyboard reads (shared-first).
+private let prudentKey = "bk_prudent_v1"
+private let popupKey = "bk_popup_v1"
+private let suggKey = "bk_sugg_v1"
+private let slideKey = "bk_slide_on_v1"
+
+struct OptionsView: View {
+    @State private var corrector = false
+    @State private var popup = true
+    @State private var sugerencias = true
+    @State private var slide = true
+
+    private var store: UserDefaults? { UserDefaults(suiteName: appGroupID) }
+
+    private func load() {
+        guard let store else { return }
+        corrector = store.object(forKey: prudentKey) as? Bool ?? false
+        popup = store.object(forKey: popupKey) as? Bool ?? true
+        sugerencias = store.object(forKey: suggKey) as? Bool ?? true
+        slide = store.object(forKey: slideKey) as? Bool ?? true
+    }
+
+    private func save() {
+        store?.set(corrector, forKey: prudentKey)
+        store?.set(popup, forKey: popupKey)
+        store?.set(sugerencias, forKey: suggKey)
+        store?.set(slide, forKey: slideKey)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Corrección prudente", isOn: $corrector)
+                Toggle("Popup de la letra al tocar", isOn: $popup)
+                Toggle("Sugerencias", isOn: $sugerencias)
+                Toggle("Slide: arrastrar escribe", isOn: $slide)
+            } footer: {
+                Text("Estos ajustes viajan al teclado por el mismo cajón compartido del diccionario. Si un ajuste no se refleja en el teclado, el cajón no se compartió: avísale a Muse.")
+            }
+        }
+        .navigationTitle("⚙️ Opciones")
+        .onAppear { load() }
+        .onChange(of: corrector) { _, _ in save() }
+        .onChange(of: popup) { _, _ in save() }
+        .onChange(of: sugerencias) { _, _ in save() }
+        .onChange(of: slide) { _, _ in save() }
+    }
+}
 
 struct DictionaryView: View {
     @State private var words: [String] = []
@@ -109,7 +158,7 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.8")
+                        Text("v0.9")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -126,6 +175,24 @@ struct ContentView: View {
                     } label: {
                         HStack {
                             Text("📖 Mi diccionario personal")
+                                .font(.headline)
+                            Spacer()
+                            Text("›")
+                                .font(.title3)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+
+                    // v0.9 (Brian): the keyboard's switches moved here.
+                    NavigationLink {
+                        OptionsView()
+                    } label: {
+                        HStack {
+                            Text("⚙️ Opciones del teclado")
                                 .font(.headline)
                             Spacer()
                             Text("›")
