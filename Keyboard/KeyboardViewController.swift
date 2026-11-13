@@ -173,6 +173,9 @@ class KeyboardViewController: UIInputViewController {
         popupEnabled = settingBool(popupKey, default: true)
         suggEnabled = settingBool(suggKey, default: true)
         slideOn = settingBool(slidePrefKey, default: true)
+        keyRowH = CGFloat(min(66, max(46, settingInt(keyHKey, default: 56))))
+        keyGap = CGFloat(min(6, max(0, settingInt(keyGapKey, default: 0))))
+        bordersOn = settingBool(bordersKey, default: true)
     }
     /// v0.6 (Brian): personal dictionary — words he pins himself
     /// (long-press a suggestion chip). They outrank learned words.
@@ -191,6 +194,32 @@ class KeyboardViewController: UIInputViewController {
     private let langKey = "bk_lang_v1"
     private lazy var lang: String = wordStore.string(forKey: langKey)
         ?? UserDefaults.standard.string(forKey: langKey) ?? "es"
+    /// v0.11 (Brian): the VISUAL EDITOR lives in the keyboard itself.
+    /// The app-as-control-centre died with the shared drawer (the
+    /// unsigned SideStore build drops the App Groups entitlement), so
+    /// his switches, key size, gaps and borders are edited HERE, on the
+    /// keyboard he is looking at, and saved in the keyboard's own store.
+    private let keyHKey = "bk_key_h_v1"
+    private let keyGapKey = "bk_key_gap_v1"
+    private let bordersKey = "bk_borders_v1"
+    private var keyRowH: CGFloat = 56
+    private var keyGap: CGFloat = 0
+    private var bordersOn: Bool = true
+    private var editorOpen = false
+    // Staged editor values: nothing persists until he taps Listo.
+    private var edPrudent = false, edPopup = true, edSugg = true, edSlide = true
+    private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
+    private var editorPreview: UIStackView?
+    private var editorHLabel: UILabel?
+    private var editorGapLabel: UILabel?
+    /// Total keyboard height at the current key size/gaps, anchored on
+    /// the known-good 315 at 56pt rows with zero gap.
+    private var kbBaseHeight: CGFloat { 315 + (keyRowH - 56) * 4 + keyGap * 3 }
+    func settingInt(_ key: String, default def: Int) -> Int {
+        if let v = wordStore.object(forKey: key) as? Int { return v }
+        if let v = UserDefaults.standard.object(forKey: key) as? Int { return v }
+        return def
+    }
     /// All keys a finger may slide-commit into on the current page.
     /// Exactly the typing keys — function keys are never in this list,
     /// which is also what makes the proximity rescue safe.
@@ -305,7 +334,7 @@ class KeyboardViewController: UIInputViewController {
         heightConstraint = NSLayoutConstraint(item: view!, attribute: .height,
                                         relatedBy: .equal, toItem: nil,
                                         attribute: .notAnAttribute,
-                                        multiplier: 1.0, constant: 315)
+                                        multiplier: 1.0, constant: kbBaseHeight)
         heightConstraint.priority = UILayoutPriority(999)
         view.addConstraint(heightConstraint)
 
@@ -409,6 +438,7 @@ class KeyboardViewController: UIInputViewController {
         // spaceTapped's own check missed (mode was still .symbols then).
         autoShiftIfNeeded()
 
+        mainStack.spacing = keyGap
         mainStack.addArrangedSubview(suggestionBar)
 
         // Variants strip (hidden until a long-press).
@@ -429,11 +459,16 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.heightAnchor.constraint(equalToConstant: 40).isActive = true
         mainStack.addArrangedSubview(panelStrip)
 
-        switch mode {
-        case .letters: buildLetters()
-        case .numbers: buildNumbers()
-        case .symbols: buildSymbols()
-        case .emoji: buildEmoji()
+        // v0.11: while the visual editor is open it replaces the rows.
+        if editorOpen {
+            buildEditor()
+        } else {
+            switch mode {
+            case .letters: buildLetters()
+            case .numbers: buildNumbers()
+            case .symbols: buildSymbols()
+            case .emoji: buildEmoji()
+            }
         }
         // V1.8: space is NOT a slide target anymore. V1.7 data showed a
         // space sneaking in before commas and question marks — his drag
@@ -507,8 +542,8 @@ class KeyboardViewController: UIInputViewController {
         // .fillEqually for uniform key rows: with plain .fill the stack gives
         // ALL spare width to the first key (V1.1 bug: giant Q and A keys).
         row.distribution = equal ? .fillEqually : .fill
-        row.spacing = 0   // v0.4: keys touch — no dead gap to fall into
-        row.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        row.spacing = keyGap   // v0.4: keys touch — no dead gap to fall into
+        row.heightAnchor.constraint(equalToConstant: keyRowH).isActive = true
         for key in keys { row.addArrangedSubview(key) }
         return row
     }
@@ -690,8 +725,8 @@ class KeyboardViewController: UIInputViewController {
             let row = UIStackView()
             row.axis = .horizontal
             row.distribution = .fillEqually
-            row.spacing = 0   // zero-gap tiling, like the letter keys
-            row.heightAnchor.constraint(equalToConstant: 56).isActive = true
+            row.spacing = keyGap   // zero-gap tiling, like the letter keys
+            row.heightAnchor.constraint(equalToConstant: keyRowH).isActive = true
             for e in emojis {
                 let b = UIButton(type: .system)
                 b.setTitle(e, for: .normal)
@@ -710,8 +745,8 @@ class KeyboardViewController: UIInputViewController {
         let row = UIStackView()
         row.axis = .horizontal
         row.distribution = .fill
-        row.spacing = 0
-        row.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        row.spacing = keyGap
+        row.heightAnchor.constraint(equalToConstant: keyRowH).isActive = true
         let abc = functionKey("ABC", action: #selector(showLetters))
         abc.widthAnchor.constraint(equalToConstant: 64).isActive = true
         row.addArrangedSubview(abc)
@@ -761,8 +796,8 @@ class KeyboardViewController: UIInputViewController {
         let row = UIStackView()
         row.axis = .horizontal
         row.distribution = .fill
-        row.spacing = 0   // v0.4 zero-gap tiling applies to this row too
-        row.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        row.spacing = keyGap   // v0.4 zero-gap tiling applies to this row too
+        row.heightAnchor.constraint(equalToConstant: keyRowH).isActive = true
 
         // NO globe key (V1.3, Brian: "ese logo del mundo molesta"). It sat
         // in his left thumb's travel path and an accidental tap teleported
@@ -830,7 +865,7 @@ class KeyboardViewController: UIInputViewController {
     /// keys stay visually distinct. NO gaps come back — it's paint,
     /// not space. Layer-level, so the baked key images can't eat it.
     private func outline(_ b: UIButton) {
-        b.layer.borderWidth = 1
+        b.layer.borderWidth = bordersOn ? 1 : 0
         b.layer.borderColor = UIColor.black.withAlphaComponent(0.55).cgColor
     }
 
@@ -895,13 +930,13 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.addArrangedSubview(close)
         panelStrip.isHidden = true
         variantStrip.isHidden = false
-        heightConstraint.constant = 362
+        heightConstraint.constant = kbBaseHeight + 47
     }
 
     @objc private func hideVariants() {
         variantStrip.isHidden = true
         panelStrip?.isHidden = true
-        heightConstraint.constant = 315
+        heightConstraint.constant = kbBaseHeight
         variantOwner = nil
         variantExpected = nil
     }
@@ -1323,7 +1358,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.addArrangedSubview(stripButton("➡", #selector(wordsNextTapped)))
         panelStrip.isHidden = false
         variantStrip.isHidden = false
-        heightConstraint.constant = 421
+        heightConstraint.constant = kbBaseHeight + 106
     }
 
     @objc private func wordsPrevTapped() {
@@ -1495,6 +1530,7 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.addArrangedSubview(stripButton("🗑 Borrar", #selector(logClearTapped)))
         variantStrip.addArrangedSubview(stripButton(
             lang == "en" ? "🌐 EN" : "🌐 ES", #selector(langToggleTapped)))
+        variantStrip.addArrangedSubview(stripButton("🎨 Editor", #selector(editorTapped)))
         let close = UIButton(type: .system)
         close.setTitle("✕", for: .normal)
         close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
@@ -1504,13 +1540,14 @@ class KeyboardViewController: UIInputViewController {
         close.addTarget(self, action: #selector(hideVariants), for: .touchUpInside)
         variantStrip.addArrangedSubview(close)
 
-        // v0.9 (Brian): NO second strip any more. The switches (Popup,
-        // Suger, Slide, corrector) live in the app's Opciones page now;
-        // this panel keeps only the log tools and the language flip.
+        // v0.11 (Brian): the switches moved INTO the visual editor
+        // (next button) — the app's Opciones page could not reach the
+        // keyboard without the shared drawer. This panel keeps the log
+        // tools, the language flip and the way into the editor.
         panelStrip.isHidden = true
         variantStrip.isHidden = false
-        heightConstraint.constant = 362
-        flashBar("MyKeys v0.10 Speed Lab", "")
+        heightConstraint.constant = kbBaseHeight + 47
+        flashBar("MyKeys v0.11 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1544,6 +1581,210 @@ class KeyboardViewController: UIInputViewController {
         if logEnabled { logEvent(k: "CFG", m: lang == "en" ? "lang-en" : "lang-es", viewPoint: .zero, frame: nil) }
         updateSuggestions()
         showLogPanel()   // rebuild so the label shows the new language
+    }
+
+
+    // MARK: - v0.11 Visual editor (Brian)
+
+    @objc private func editorTapped() {
+        edPrudent = prudentEnabled; edPopup = popupEnabled
+        edSugg = suggEnabled; edSlide = slideOn
+        edH = keyRowH; edGap = keyGap; edBorders = bordersOn
+        editorOpen = true
+        buildKeyboard()
+    }
+
+    private func editorRow(_ height: CGFloat) -> UIStackView {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.distribution = .fill
+        row.spacing = 6
+        row.heightAnchor.constraint(equalToConstant: height).isActive = true
+        mainStack.addArrangedSubview(row)
+        return row
+    }
+
+    private func editorLabel(_ text: String, size: CGFloat = 15) -> UILabel {
+        let l = UILabel()
+        l.text = text
+        l.font = .systemFont(ofSize: size, weight: .medium)
+        l.textColor = .label
+        return l
+    }
+
+    private func editorPill(_ title: String, on: Bool, action: Selector) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setTitle("\(title): \(on ? "S\u{cd}" : "NO")", for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        b.setTitleColor(.label, for: .normal)
+        b.backgroundColor = on ? UIColor.systemTeal.withAlphaComponent(0.35)
+                               : .tertiarySystemBackground
+        b.layer.cornerRadius = 8
+        b.addTarget(self, action: action, for: .touchUpInside)
+        return b
+    }
+
+    private func buildEditor() {
+        let head = editorRow(38)
+        let title = editorLabel("🎨 Editor visual")
+        title.font = .systemFont(ofSize: 17, weight: .bold)
+        head.addArrangedSubview(title)
+        let close = UIButton(type: .system)
+        close.setTitle("✕", for: .normal)
+        close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
+        close.setTitleColor(.label, for: .normal)
+        close.backgroundColor = .tertiarySystemBackground
+        close.layer.cornerRadius = 8
+        close.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        close.addTarget(self, action: #selector(editorCloseTapped), for: .touchUpInside)
+        head.addArrangedSubview(close)
+
+        let sw1 = editorRow(40)
+        sw1.distribution = .fillEqually
+        sw1.addArrangedSubview(editorPill("Corrector", on: edPrudent, action: #selector(edTogglePrudent)))
+        sw1.addArrangedSubview(editorPill("Popup", on: edPopup, action: #selector(edTogglePopup)))
+        let sw2 = editorRow(40)
+        sw2.distribution = .fillEqually
+        sw2.addArrangedSubview(editorPill("Sugerencias", on: edSugg, action: #selector(edToggleSugg)))
+        sw2.addArrangedSubview(editorPill("Slide", on: edSlide, action: #selector(edToggleSlide)))
+
+        let sH = editorRow(44)
+        let lH = editorLabel("Tamaño")
+        lH.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        sH.addArrangedSubview(lH)
+        let sliderH = UISlider()
+        sliderH.minimumValue = 46; sliderH.maximumValue = 66
+        sliderH.value = Float(edH)
+        sliderH.addTarget(self, action: #selector(edHeightChanged(_:)), for: .valueChanged)
+        sH.addArrangedSubview(sliderH)
+        editorHLabel = editorLabel("\(Int(edH))")
+        editorHLabel!.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        sH.addArrangedSubview(editorHLabel!)
+
+        let sG = editorRow(44)
+        let lG = editorLabel("Espacio")
+        lG.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        sG.addArrangedSubview(lG)
+        let sliderG = UISlider()
+        sliderG.minimumValue = 0; sliderG.maximumValue = 6
+        sliderG.value = Float(edGap)
+        sliderG.addTarget(self, action: #selector(edGapChanged(_:)), for: .valueChanged)
+        sG.addArrangedSubview(sliderG)
+        editorGapLabel = editorLabel("\(Int(edGap))")
+        editorGapLabel!.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        sG.addArrangedSubview(editorGapLabel!)
+
+        let sw3 = editorRow(40)
+        sw3.distribution = .fillEqually
+        sw3.addArrangedSubview(editorPill("Bordes", on: edBorders, action: #selector(edToggleBorders)))
+        let hint = editorLabel("Vista previa \u{2193}", size: 13)
+        hint.textAlignment = .center
+        sw3.addArrangedSubview(hint)
+
+        editorPreview = UIStackView()
+        editorPreview!.axis = .horizontal
+        editorPreview!.distribution = .fillEqually
+        editorPreview!.spacing = edGap
+        editorPreview!.heightAnchor.constraint(equalToConstant: edH).isActive = true
+        mainStack.addArrangedSubview(editorPreview!)
+        refillEditorPreview()
+
+        let bottom = editorRow(44)
+        bottom.distribution = .fillEqually
+        let words = UIButton(type: .system)
+        words.setTitle("📖 Palabras", for: .normal)
+        words.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        words.setTitleColor(.label, for: .normal)
+        words.backgroundColor = keyColor
+        words.layer.cornerRadius = 8
+        words.addTarget(self, action: #selector(editorWordsTapped), for: .touchUpInside)
+        bottom.addArrangedSubview(words)
+        let done = UIButton(type: .system)
+        done.setTitle("\u{2713} Listo", for: .normal)
+        done.titleLabel?.font = .systemFont(ofSize: 15, weight: .bold)
+        done.setTitleColor(.white, for: .normal)
+        done.backgroundColor = .systemTeal
+        done.layer.cornerRadius = 8
+        done.addTarget(self, action: #selector(editorDoneTapped), for: .touchUpInside)
+        bottom.addArrangedSubview(done)
+
+        heightConstraint.constant = kbBaseHeight + 106
+    }
+
+    private func refillEditorPreview() {
+        guard let preview = editorPreview else { return }
+        for arranged in preview.arrangedSubviews {
+            preview.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        preview.spacing = edGap
+        for c in preview.constraints where c.firstAttribute == .height { c.constant = edH }
+        for ch in ["Q", "W", "E", "R", "T", "Y"] {
+            let b = UIButton(type: .system)
+            b.setTitle(ch, for: .normal)
+            b.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+            b.setTitleColor(.label, for: .normal)
+            b.backgroundColor = keyColor
+            b.layer.cornerRadius = 12
+            b.layer.borderWidth = edBorders ? 1 : 0
+            b.layer.borderColor = UIColor.black.withAlphaComponent(0.55).cgColor
+            b.isEnabled = false
+            preview.addArrangedSubview(b)
+        }
+    }
+
+    @objc private func edTogglePrudent() { edPrudent.toggle(); buildKeyboard() }
+    @objc private func edTogglePopup() { edPopup.toggle(); buildKeyboard() }
+    @objc private func edToggleSugg() { edSugg.toggle(); buildKeyboard() }
+    @objc private func edToggleSlide() { edSlide.toggle(); buildKeyboard() }
+    @objc private func edToggleBorders() { edBorders.toggle(); buildKeyboard() }
+
+    @objc private func edHeightChanged(_ sender: UISlider) {
+        edH = CGFloat(Int(sender.value.rounded()))
+        editorHLabel?.text = "\(Int(edH))"
+        refillEditorPreview()
+    }
+
+    @objc private func edGapChanged(_ sender: UISlider) {
+        edGap = CGFloat(Int(sender.value.rounded()))
+        editorGapLabel?.text = "\(Int(edGap))"
+        refillEditorPreview()
+    }
+
+    @objc private func editorCloseTapped() {
+        editorOpen = false
+        buildKeyboard()
+        hideVariants()
+    }
+
+    @objc private func editorWordsTapped() {
+        editorOpen = false
+        buildKeyboard()
+        showWordsPanel()
+    }
+
+    @objc private func editorDoneTapped() {
+        prudentEnabled = edPrudent; popupEnabled = edPopup
+        suggEnabled = edSugg; slideOn = edSlide
+        keyRowH = edH; keyGap = edGap; bordersOn = edBorders
+        // Saved in BOTH of the keyboard's own stores, like the language
+        // flip: the keyboard always reads its own last word (v0.11).
+        for (key, val) in [(prudentKey, edPrudent), (popupKey, edPopup),
+                           (suggKey, edSugg), (slidePrefKey, edSlide),
+                           (bordersKey, edBorders)] {
+            wordStore.set(val, forKey: key)
+            UserDefaults.standard.set(val, forKey: key)
+        }
+        wordStore.set(Int(edH), forKey: keyHKey)
+        UserDefaults.standard.set(Int(edH), forKey: keyHKey)
+        wordStore.set(Int(edGap), forKey: keyGapKey)
+        UserDefaults.standard.set(Int(edGap), forKey: keyGapKey)
+        if !popupEnabled { hidePopup() }
+        if logEnabled { logEvent(k: "CFG", m: "editor-done", viewPoint: .zero, frame: nil) }
+        editorOpen = false
+        buildKeyboard()
+        hideVariants()
+        flashBar("Editor aplicado \u{2713}", "")
     }
 
     @objc private func logToggleTapped() {
