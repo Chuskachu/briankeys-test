@@ -3,14 +3,14 @@ import SwiftUI
 // The fixed test suite. Same texts every build so versions compare honestly.
 // Written in Brian's real style: closing ? and ! only, never opening ¿ ¡
 // (the keyboard still offers ¿ ¡ on long-press, for completeness).
+// Suite v2 (Brian, 2026-11-14): SEVEN texts were too many. Only two
+// from now on — the original Spanish text 1 and the English pangram
+// (old text 4). The blind test is retired: the blind-typing dream was
+// closed with the 2026-11-13 reframe, so it no longer measures
+// anything he is aiming at.
 private let testTexts: [String] = [
-    "Hola, amigos. Estamos probando el teclado nuevo.",
-    "Ven conmigo, no me canso nunca, ven ven ven",
-    "Cómo estás, niño? Qué alegría más grande!!!",
-    "The quick brown fox jumps over the lazy dog",
-    "Leo sale a las 3:30 y vuelve el 15 de mayo",
-    "chumaleeee, wokiii, tamos contat? cheverazo!!!",
-    "PRUEBA CIEGA: el texto 1 otra vez, sin mirar el teclado, ojos solo en el texto."
+    "Hola, amigos. Estamos probando el teclado nuevo con las teclas más chicas y la verdad se siente muy bien. Mañana salimos a las 9 para Ogawamachi, llevamos a Leo a jugar un rato y después comemos algo rico en familia. Qué alegría poder escribir así de rápido, sin pelear con cada palabra!!!",
+    "The quick brown fox jumps over the lazy dog. We are testing the new keyboard with the smaller keys and it honestly feels great. Tomorrow we leave at 9, take the train into the city, and spend the whole day walking around with Leo and Rocio."
 ]
 
 // v0.8 (Brian): the app and the keyboard share ONE drawer (App Groups)
@@ -158,7 +158,7 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.11")
+                        Text("v0.12")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

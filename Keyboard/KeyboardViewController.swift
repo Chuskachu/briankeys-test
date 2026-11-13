@@ -209,6 +209,12 @@ class KeyboardViewController: UIInputViewController {
     // Staged editor values: nothing persists until he taps Listo.
     private var edPrudent = false, edPopup = true, edSugg = true, edSlide = true
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
+    /// v0.12 (Brian): the big words editor — a full page like the
+    /// visual editor, for his OWN words only (the old 5-per-page panel
+    /// mixed ~750 learned words in and was useless for managing them).
+    private var wordsOpen = false
+    private var wordsPage = 0
+    private var addingWord = false
     private var editorPreview: UIStackView?
     private var editorHLabel: UILabel?
     private var editorGapLabel: UILabel?
@@ -459,8 +465,10 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.heightAnchor.constraint(equalToConstant: 40).isActive = true
         mainStack.addArrangedSubview(panelStrip)
 
-        // v0.11: while the visual editor is open it replaces the rows.
-        if editorOpen {
+        // v0.11/v0.12: the editor pages replace the key rows.
+        if wordsOpen {
+            buildWordsEditor()
+        } else if editorOpen {
             buildEditor()
         } else {
             switch mode {
@@ -934,6 +942,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func hideVariants() {
+        addingWord = false   // v0.12: the add-word strip is gone too
         variantStrip.isHidden = true
         panelStrip?.isHidden = true
         heightConstraint.constant = kbBaseHeight
@@ -1147,6 +1156,35 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func refreshBar() { updateSuggestions() }
 
+    /// v0.12: true when two folded words are exactly one edit apart
+    /// (insertion, deletion, substitution or transposition).
+    private func editDistanceOne(_ a: String, _ b: String) -> Bool {
+        let x = Array(a), y = Array(b)
+        if abs(x.count - y.count) > 1 { return false }
+        if x.count == y.count {
+            var diffs: [Int] = []
+            for i in x.indices where x[i] != y[i] { diffs.append(i) }
+            if diffs.count == 1 { return true }
+            if diffs.count == 2 {
+                let i = diffs[0], j = diffs[1]
+                return j == i + 1 && x[i] == y[j] && x[j] == y[i]
+            }
+            return false
+        }
+        let (short, long) = x.count < y.count ? (x, y) : (y, x)
+        var i = 0, j = 0, skipped = false
+        while i < short.count {
+            if short[i] == long[j] {
+                i += 1; j += 1
+            } else {
+                if skipped { return false }
+                skipped = true
+                j += 1
+            }
+        }
+        return true
+    }
+
     private func computeSuggestions(for prefix: String) -> [String] {
         if prefix.isEmpty {
             // No word in progress: v0.6 — first, what HIS phrases say
@@ -1205,6 +1243,18 @@ class KeyboardViewController: UIInputViewController {
         for (i, w) in dictWords.enumerated() where dictFolded[i].hasPrefix(fp) {
             offer(w)
             if out.count == 3 { return out }
+        }
+        // v0.12 (Brian): near-word OFFERS. Prefix matching alone could
+        // never offer "que" for his "qie" — when the prefix well runs
+        // dry, fill the free chips with words one edit away (folded),
+        // in dictionary order (= frequency), scanning the top 4000.
+        // Offers only: nothing applies without his tap.
+        if out.count < 3, prefix.count >= 3 {
+            for (i, w) in dictWords.enumerated().prefix(4000)
+            where !dictFolded[i].hasPrefix(fp) && editDistanceOne(fp, dictFolded[i]) {
+                offer(w)
+                if out.count == 3 { break }
+            }
         }
         return out
     }
@@ -1547,7 +1597,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.11 Speed Lab", "")
+        flashBar("MyKeys v0.12 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1759,8 +1809,9 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func editorWordsTapped() {
         editorOpen = false
+        wordsOpen = true
+        wordsPage = 0
         buildKeyboard()
-        showWordsPanel()
     }
 
     @objc private func editorDoneTapped() {
@@ -1785,6 +1836,188 @@ class KeyboardViewController: UIInputViewController {
         buildKeyboard()
         hideVariants()
         flashBar("Editor aplicado \u{2713}", "")
+    }
+
+
+    // MARK: - v0.12 Words editor (Brian)
+
+    private func sortedPersonal() -> [String] {
+        personal.sorted {
+            let c0 = learned[$0] ?? 0, c1 = learned[$1] ?? 0
+            return c0 != c1 ? c0 > c1 : $0 < $1
+        }
+    }
+
+    private func buildWordsEditor() {
+        let head = editorRow(38)
+        let title = editorLabel("📖 Mis palabras")
+        title.font = .systemFont(ofSize: 17, weight: .bold)
+        head.addArrangedSubview(title)
+        let close = UIButton(type: .system)
+        close.setTitle("✕", for: .normal)
+        close.titleLabel?.font = .systemFont(ofSize: 18, weight: .bold)
+        close.setTitleColor(.label, for: .normal)
+        close.backgroundColor = .tertiarySystemBackground
+        close.layer.cornerRadius = 8
+        close.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        close.addTarget(self, action: #selector(wordsCloseTapped), for: .touchUpInside)
+        head.addArrangedSubview(close)
+
+        let sub = editorRow(24)
+        let hint = editorLabel("Toca una palabra para borrarla", size: 13)
+        hint.textColor = .secondaryLabel
+        sub.addArrangedSubview(hint)
+
+        // 6 rows x 3 = 18 of HIS words per page — he asked for double
+        // height, so this page is much taller than the letters page.
+        let words = sortedPersonal()
+        let perPage = 18
+        let pages = max(1, (words.count + perPage - 1) / perPage)
+        wordsPage = min(wordsPage, pages - 1)
+        let slice = Array(words.dropFirst(wordsPage * perPage).prefix(perPage))
+        for r in 0..<6 {
+            let row = editorRow(46)
+            row.distribution = .fillEqually
+            for c in 0..<3 {
+                let idx = r * 3 + c
+                let b = UIButton(type: .system)
+                if idx < slice.count {
+                    b.setTitle(slice[idx], for: .normal)
+                    b.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+                    b.setTitleColor(.label, for: .normal)
+                    b.backgroundColor = keyColor
+                    b.layer.cornerRadius = 8
+                    if bordersOn { outline(b) }
+                    b.accessibilityIdentifier = slice[idx]
+                    b.addTarget(self, action: #selector(wordChipDeleteTapped(_:)), for: .touchUpInside)
+                } else {
+                    b.backgroundColor = .clear
+                    b.isEnabled = false
+                }
+                row.addArrangedSubview(b)
+            }
+        }
+
+        let pager = editorRow(40)
+        pager.distribution = .fillEqually
+        pager.addArrangedSubview(stripButton("⬅", #selector(wordsPrevTapped)))
+        let pageLabel = editorLabel("Página \(wordsPage + 1)/\(pages)", size: 14)
+        pageLabel.textAlignment = .center
+        pager.addArrangedSubview(pageLabel)
+        pager.addArrangedSubview(stripButton("➡", #selector(wordsNextTapped)))
+
+        let actions = editorRow(44)
+        actions.distribution = .fillEqually
+        let add = UIButton(type: .system)
+        add.setTitle("＋ Agregar", for: .normal)
+        add.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        add.setTitleColor(.label, for: .normal)
+        add.backgroundColor = keyColor
+        add.layer.cornerRadius = 8
+        add.addTarget(self, action: #selector(wordsAddTapped), for: .touchUpInside)
+        actions.addArrangedSubview(add)
+        let wipe = UIButton(type: .system)
+        wipe.setTitle("🗑 Aprendidas", for: .normal)
+        wipe.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        wipe.setTitleColor(.label, for: .normal)
+        wipe.backgroundColor = keyColor
+        wipe.layer.cornerRadius = 8
+        wipe.addTarget(self, action: #selector(wordsWipeLearnedTapped), for: .touchUpInside)
+        actions.addArrangedSubview(wipe)
+
+        let doneRow = editorRow(44)
+        let done = UIButton(type: .system)
+        done.setTitle("\u{2713} Listo", for: .normal)
+        done.titleLabel?.font = .systemFont(ofSize: 15, weight: .bold)
+        done.setTitleColor(.white, for: .normal)
+        done.backgroundColor = .systemTeal
+        done.layer.cornerRadius = 8
+        done.addTarget(self, action: #selector(wordsCloseTapped), for: .touchUpInside)
+        doneRow.addArrangedSubview(done)
+
+        heightConstraint.constant = kbBaseHeight + 270
+    }
+
+    @objc private func wordsCloseTapped() {
+        wordsOpen = false
+        buildKeyboard()
+        hideVariants()
+    }
+
+    @objc private func wordChipDeleteTapped(_ sender: UIButton) {
+        guard let w = sender.accessibilityIdentifier else { return }
+        personal.remove(w)
+        wordStore.set(Array(personal), forKey: personalKey)
+        if logEnabled { logEvent(k: "CFG", m: "word-del", viewPoint: .zero, frame: nil) }
+        buildKeyboard()
+    }
+
+    @objc private func wordsPrevTapped() {
+        if wordsPage > 0 { wordsPage -= 1 }
+        buildKeyboard()
+    }
+
+    @objc private func wordsNextTapped() {
+        let pages = max(1, (personal.count + 17) / 18)
+        if wordsPage < pages - 1 { wordsPage += 1 }
+        buildKeyboard()
+    }
+
+    @objc private func wordsWipeLearnedTapped() {
+        learned = [:]
+        learnedFolded = [:]
+        bigrams = [:]
+        lastCompletedWord = nil
+        wordStore.set(learned, forKey: learnedKey)
+        wordStore.set(bigrams, forKey: bigramKey)
+        if logEnabled { logEvent(k: "CFG", m: "wipe-learned", viewPoint: .zero, frame: nil) }
+        buildKeyboard()
+        flashBar("Aprendidas borradas", "")
+    }
+
+    @objc private func wordsAddTapped() {
+        wordsOpen = false
+        addingWord = true
+        buildKeyboard()
+        showAddWordStrip()
+        flashBar("Escribe la palabra nueva", "")
+    }
+
+    private func showAddWordStrip() {
+        for v in variantStrip.arrangedSubviews {
+            variantStrip.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+        variantStrip.addArrangedSubview(stripButton("📌 Guardar palabra", #selector(addWordSaveTapped)))
+        variantStrip.addArrangedSubview(stripButton("✕ Cancelar", #selector(addWordCancelTapped)))
+        variantStrip.isHidden = false
+        panelStrip?.isHidden = true
+        heightConstraint.constant = kbBaseHeight + 47
+    }
+
+    @objc private func addWordSaveTapped() {
+        let w = localWord
+        guard w.count >= 2 else {
+            flashBar("Escribe la palabra primero", "")
+            return
+        }
+        personal.insert(w)
+        wordStore.set(Array(personal), forKey: personalKey)
+        for _ in w { textDocumentProxy.deleteBackward() }
+        localWord = ""
+        if logEnabled { logEvent(k: "CFG", m: "word-add", viewPoint: .zero, frame: nil) }
+        hideVariants()
+        // Back into the words editor so he sees the save landed.
+        wordsOpen = true
+        wordsPage = max(0, (personal.count - 1) / 18)
+        buildKeyboard()
+        flashBar("Guardada: \(w)", "")
+    }
+
+    @objc private func addWordCancelTapped() {
+        hideVariants()
+        wordsOpen = true
+        buildKeyboard()
     }
 
     @objc private func logToggleTapped() {
