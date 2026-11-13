@@ -1510,7 +1510,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = 362
-        flashBar("BrianKeys v0.9 Speed Lab", "")
+        flashBar("MyKeys v0.10 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {

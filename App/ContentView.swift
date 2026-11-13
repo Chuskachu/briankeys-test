@@ -153,17 +153,17 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("BrianKeys")
+                        Text("MyKeys")
                             .font(.title2)
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.9")
+                        Text("v0.10")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("Actívalo en Ajustes → General → Teclado → Teclados → BrianKeysTest, y no olvides «Permitir acceso total» (lo necesitan los haptics).")
+                    Text("Actívalo en Ajustes → General → Teclado → Teclados → MyKeys, y no olvides «Permitir acceso total» (lo necesitan los haptics).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
@@ -216,7 +216,7 @@ struct ContentView: View {
 
                     HStack {
                         Button("📋 Copiar TODO") {
-                            var parts = ["BrianKeys — resultados de la suite"]
+                            var parts = ["MyKeys — resultados de la suite"]
                             for i in testTexts.indices where !attempts[i].isEmpty {
                                 parts.append("\(i + 1). Meta: \(testTexts[i])\n   Intento: \(attempts[i])")
                             }
