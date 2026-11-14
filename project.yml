@@ -55,7 +55,7 @@ targets:
           NSExtensionAttributes:
             IsASCIICapable: true
             PrefersRightToLeft: false
-            PrimaryLanguage: en-US
+            PrimaryLanguage: es
             RequestsOpenAccess: true
     settings:
       base:

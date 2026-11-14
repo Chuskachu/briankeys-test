@@ -150,14 +150,15 @@ class KeyboardViewController: UIInputViewController {
     /// full log only 3 in ~2,000 taps, so the test is cheap and clean.
     private let slidePrefKey = "bk_slide_on_v1"
     private lazy var slideOn: Bool = settingBool(slidePrefKey, default: true)
-    /// v0.8 (Brian): his words live in ONE drawer shared between the
-    /// app and the keyboard (App Groups), so he can add and delete
-    /// words from inside the app and the keyboard just uses that list.
-    /// Under SideStore the sharing is a HYPOTHESIS until he tests it
-    /// on the phone; if the shared drawer cannot be opened, wordStore
-    /// falls back to the keyboard's own drawer and nothing changes.
+    /// v0.8 (Brian): his words lived in ONE drawer shared between the
+    /// app and the keyboard (App Groups). v0.16 (Brian): that drawer
+    /// never existed under SideStore — the unsigned build drops the
+    /// entitlement (verified 2026-11-14) — so EVERYTHING now lives in
+    /// the keyboard's own drawer: wordStore IS .standard. The old
+    /// suite is read once at first v0.16 launch to rescue his data
+    /// (see rescueWordsFromDeadDrawer).
     static let appGroupID = "group.com.brianklauer.briankeys"
-    lazy var wordStore: UserDefaults = UserDefaults(suiteName: KeyboardViewController.appGroupID) ?? .standard
+    lazy var wordStore: UserDefaults = .standard
     /// v0.9 (Brian): his switches live in the APP now (Opciones page)
     /// and travel through the same shared drawer as his words. The
     /// keyboard reads shared-first, local-second: a switch he flips in
@@ -295,35 +296,34 @@ class KeyboardViewController: UIInputViewController {
         s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
     }
 
-    /// v0.8: the first time the shared drawer opens, carry his existing
-    /// words (personal + learned + bigrams) over from the keyboard's
-    /// own drawer. Runs once; from then on the app and the keyboard
-    /// read and write the same drawer.
-    private func migrateWordsToSharedDrawer() {
-        guard let shared = UserDefaults(suiteName: KeyboardViewController.appGroupID) else { return }
+    /// v0.16 (Brian): the shared drawer is dead (see wordStore). On
+    /// the first v0.16 launch, rescue EVERYTHING the keyboard kept in
+    /// the old suite — his words, counts, language, switches, geometry
+    /// and emoji tallies — into the keyboard's own drawer. A key is
+    /// copied only when the local drawer does not have it yet, so the
+    /// rescue can never overwrite anything newer.
+    private func rescueWordsFromDeadDrawer() {
         let local = UserDefaults.standard
-        if shared.object(forKey: "bk_migrated_v08") == nil {
-            if shared.stringArray(forKey: personalKey) == nil,
-               let mine = local.stringArray(forKey: personalKey) {
-                shared.set(mine, forKey: personalKey)
+        guard local.object(forKey: "bk_local_home_v16") == nil,
+              let dead = UserDefaults(suiteName: KeyboardViewController.appGroupID)
+        else { return }
+        let keys = [personalKey, learnedKey, bigramKey, langKey,
+                    prudentKey, popupKey, suggKey, slidePrefKey,
+                    keyHKey, keyGapKey, bordersKey, logOnKey,
+                    "bk_emoji_counts_v1", "bk_emoji_recents_v1"]
+        for k in keys {
+            if local.object(forKey: k) == nil, let v = dead.object(forKey: k) {
+                local.set(v, forKey: k)
             }
-            if shared.dictionary(forKey: learnedKey) == nil,
-               let mine = local.dictionary(forKey: learnedKey) {
-                shared.set(mine, forKey: learnedKey)
-            }
-            if shared.dictionary(forKey: bigramKey) == nil,
-               let mine = local.dictionary(forKey: bigramKey) {
-                shared.set(mine, forKey: bigramKey)
-            }
-            shared.set(true, forKey: "bk_migrated_v08")
         }
+        local.set(true, forKey: "bk_local_home_v16")
     }
 
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        migrateWordsToSharedDrawer()   // v0.8: before anything reads his words
+        rescueWordsFromDeadDrawer()   // v0.16: before anything reads his words
         refreshSettings()   // v0.9: his switches, as last set in the app
         hapticHeavy.prepare()
         // Seed the folded-form cache for learned words (v0.2 diet:
@@ -1815,7 +1815,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.15 Speed Lab", "")
+        flashBar("MyKeys v0.16 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2089,7 +2089,11 @@ class KeyboardViewController: UIInputViewController {
 
         // 6 rows x 3 = 18 of HIS words per page — he asked for double
         // height, so this page is much taller than the letters page.
-        let words = sortedPersonal()
+        // v0.16 (Brian): ALL his words — pinned first, then everything
+        // the keyboard has learned, by frequency — so he can SEE the
+        // learning (v0.12 showed only the pinned ones and he rightly
+        // concluded nothing was being learned).
+        let words = allPersonalWords()
         let perPage = 18
         let pages = max(1, (words.count + perPage - 1) / perPage)
         wordsPage = min(wordsPage, pages - 1)
@@ -2167,6 +2171,11 @@ class KeyboardViewController: UIInputViewController {
         guard let w = sender.accessibilityIdentifier else { return }
         personal.remove(w)
         wordStore.set(Array(personal), forKey: personalKey)
+        // v0.16: the editor now lists learned words too — deleting one
+        // must kill it in BOTH drawers or it would rise from the dead.
+        learned[w] = nil
+        learnedFolded[w] = nil
+        wordStore.set(learned, forKey: learnedKey)
         if logEnabled { logEvent(k: "CFG", m: "word-del", viewPoint: .zero, frame: nil) }
         buildKeyboard()
     }
@@ -2358,6 +2367,17 @@ class KeyboardViewController: UIInputViewController {
         if text.count == 1, let c = text.first, !c.isLetter, c != " " {
             completeWord()   // a punctuation mark completes a word
             localWord = ""
+            // v0.16 (Brian): punctuation hugs the word. "palabra" + space
+            // + "!" used to stay "palabra !" — eat the space so it lands
+            // as "palabra!". Only after a letter, so "3 ," and emoji are
+            // untouched.
+            if ".,;:!?".contains(c) {
+                let before = textDocumentProxy.documentContextBeforeInput ?? ""
+                if before.hasSuffix(" "),
+                   let prev = before.dropLast().last, prev.isLetter {
+                    textDocumentProxy.deleteBackward()
+                }
+            }
         }
         lastSpaceAt = nil   // any real character breaks a double-space chain
         var out = text
