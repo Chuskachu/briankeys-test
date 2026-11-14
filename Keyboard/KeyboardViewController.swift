@@ -461,8 +461,50 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    // v0.15 flash attempt #3 (HYPOTHESIS): PERSISTENT PAGES. Each mode
+    // page is built once; switching detaches its views into a cache
+    // and reattaches them later — no rebuild, like Apple's keyboard.
+    // Attempts #1 (no-animation transaction) and #2 (snapshot cover)
+    // both failed. The editor pages are never cached (stateful, rare).
+    private struct CachedPage {
+        var views: [UIView]
+        var slideKeys: [KeyButton]
+        var letterButtons: [KeyButton]
+        var shiftButton: KeyButton?
+        var height: CGFloat
+    }
+    private var pageCache: [Mode: CachedPage] = [:]
+    private var shownModePage: Mode? = nil
+    private var emojiStale = false
+
+    /// Empties the stack. If a mode page was showing, its content views
+    /// go into the cache ALIVE instead of being destroyed.
+    private func detachAll() {
+        let arranged = mainStack.arrangedSubviews
+        guard !arranged.isEmpty else { return }
+        var prefix = (arranged.first === suggestionBar) ? 1 : 0
+        prefix += 2   // the variant strip and the panel strip follow
+        if arranged.count > prefix, let m = shownModePage {
+            let content = Array(arranged[prefix...])
+            pageCache[m] = CachedPage(views: content,
+                                      slideKeys: slideKeys,
+                                      letterButtons: letterButtons,
+                                      shiftButton: shiftButton,
+                                      height: heightConstraint.constant)
+            for v in content {
+                mainStack.removeArrangedSubview(v)
+                v.removeFromSuperview()
+            }
+        }
+        for v in mainStack.arrangedSubviews {
+            mainStack.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+        shownModePage = nil
+    }
+
     private func buildKeyboardNow() {
-        clearStack()
+        detachAll()
         slideKeys = []
         pendingVariantKey = nil
         pendingBaseChar = nil
@@ -501,14 +543,24 @@ class KeyboardViewController: UIInputViewController {
             buildWordsEditor()
         } else if editorOpen {
             buildEditor()
+        } else if let cached = pageCache[mode], !(mode == .emoji && emojiStale) {
+            // v0.15: reattach the cached page — no rebuild at all.
+            slideKeys = cached.slideKeys
+            letterButtons = cached.letterButtons
+            shiftButton = cached.shiftButton
+            for v in cached.views { mainStack.addArrangedSubview(v) }
+            heightConstraint.constant = cached.height
+            shownModePage = mode
+            if mode == .letters { applyShiftVisuals() }
         } else {
             if mode != .emoji { heightConstraint.constant = kbBaseHeight }
             switch mode {
             case .letters: buildLetters()
             case .numbers: buildNumbers()
             case .symbols: buildSymbols()
-            case .emoji: buildEmoji()
+            case .emoji: buildEmoji(); emojiStale = false
             }
+            shownModePage = mode
         }
         // V1.8: space is NOT a slide target anymore. V1.7 data showed a
         // space sneaking in before commas and question marks — his drag
@@ -563,6 +615,7 @@ class KeyboardViewController: UIInputViewController {
         super.traitCollectionDidChange(previousTraitCollection)
         if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle,
            mainStack != nil {
+            pageCache.removeAll()   // v0.15: cached pages hold old colours
             buildKeyboard()
         }
     }
@@ -777,6 +830,7 @@ class KeyboardViewController: UIInputViewController {
         if emojiRecents.count > 96 { emojiRecents = Array(emojiRecents.prefix(96)) }
         wordStore.set(emojiCounts, forKey: "bk_emoji_counts_v1")
         wordStore.set(emojiRecents, forKey: "bk_emoji_recents_v1")
+        emojiStale = true   // v0.15: the cached ⭐ Top must rebuild
     }
 
     /// ⭐ Top (Brian's order): most used first, then recently used
@@ -789,7 +843,20 @@ class KeyboardViewController: UIInputViewController {
         }.prefix(64).map { $0.key }
         let mostSet = Set(most)
         let rest = emojiRecents.filter { !mostSet.contains($0) }
-        let combined = Array((most + rest).prefix(96))
+        var combined = Array((most + rest).prefix(96))
+        // v0.15 (Brian's screenshot): Top looked empty with only 2 of
+        // his own — pad with starters until he has a full page (32).
+        if combined.count < 32 {
+            let starters = ["😀", "😂", "😍", "😎", "🤔", "👍", "❤️", "🔥", "🙏", "🎉", "😅", "🤓", "😊", "🥹", "😴", "🤯",
+                            "👋", "🙂", "😉", "🤣", "😭", "😱", "🥰", "😋", "🙄", "💪", "🎂", "⚽", "🚗", "🐶", "🍔", "😴"]
+            var seen = Set(combined)
+            for st in starters where !seen.contains(st) {
+                if combined.count >= 32 { break }
+                seen.insert(st)
+                combined.append(st)
+            }
+            return combined
+        }
         if !combined.isEmpty { return combined }
         return ["😀", "😂", "😍", "😎", "🤔", "👍", "❤️", "🔥", "🙏", "🎉", "😅", "🤓", "😊", "🥹", "😴", "🤯"]
     }
@@ -1748,7 +1815,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.14 Speed Lab", "")
+        flashBar("MyKeys v0.15 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1984,6 +2051,7 @@ class KeyboardViewController: UIInputViewController {
         if !popupEnabled { hidePopup() }
         if logEnabled { logEvent(k: "CFG", m: "editor-done", viewPoint: .zero, frame: nil) }
         editorOpen = false
+        pageCache.removeAll()   // v0.15: geometry/settings changed
         buildKeyboard()
         hideVariants()
         flashBar("Editor applied \u{2713}", "")
