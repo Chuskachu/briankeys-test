@@ -431,7 +431,27 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    /// v0.13 queued (Brian, 2026-11-14): page changes must be INSTANT.
+    /// His report: switching letters/capitals/numbers flashed the whole
+    /// keyboard white for a moment — visually confusing, felt like the
+    /// keys were blank. There is NO explicit animation in this code
+    /// (verified: no UIView.animate anywhere); the working hypothesis
+    /// is that the rebuild tears the whole stack down and rebuilds it,
+    /// and a frame of empty tray shows through between the two. The
+    /// cure below runs the entire swap with actions disabled and forces
+    /// layout inside the same transaction, so the new page lands in a
+    /// single frame with nothing in between.
     private func buildKeyboard() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        UIView.performWithoutAnimation {
+            buildKeyboardNow()
+            view.layoutIfNeeded()
+        }
+        CATransaction.commit()
+    }
+
+    private func buildKeyboardNow() {
         clearStack()
         slideKeys = []
         pendingVariantKey = nil
@@ -470,6 +490,7 @@ class KeyboardViewController: UIInputViewController {
         } else if editorOpen {
             buildEditor()
         } else {
+            if mode != .emoji { heightConstraint.constant = kbBaseHeight }
             switch mode {
             case .letters: buildLetters()
             case .numbers: buildNumbers()
@@ -721,33 +742,79 @@ class KeyboardViewController: UIInputViewController {
     // system emoji keyboard. ☺ on the letters page opens it; tapping an
     // emoji inserts it and the page STAYS open (several in a row is
     // normal); ABC comes back to the letters.
+    private var emojiPage = 0
+
     private func buildEmoji() {
-        let rows: [[String]] = [
-            ["😂", "🤣", "😄", "😅", "😊", "🥰", "😍", "😘"],
-            ["😉", "😎", "🤔", "🤨", "😴", "🥱", "😢", "😭"],
-            ["😱", "🤯", "🥳", "👍", "👎", "🙏", "👏", "💪"],
-            ["❤️", "🔥", "🎉", "✨", "⭐", "🎮", "☕", "🍺"]
-        ]
-        for emojis in rows {
+        // v0.13 (Brian): the FULL emoji set (EmojiData: 3,963) with a
+        // category jump strip and paging — the old page had 32.
+        let all = EmojiData.all
+        let perPage = 32
+        let pages = (all.count + perPage - 1) / perPage
+        emojiPage = min(max(0, emojiPage), pages - 1)
+
+        // Category jumps.
+        let jumps = UIStackView()
+        jumps.axis = .horizontal
+        jumps.distribution = .fillEqually
+        jumps.spacing = keyGap
+        jumps.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        for (i, label) in EmojiData.jumpLabels.enumerated() {
+            let b = UIButton(type: .system)
+            b.setTitle(label, for: .normal)
+            b.titleLabel?.font = .systemFont(ofSize: 20)
+            b.backgroundColor = keyColor
+            b.layer.cornerRadius = 8
+            outline(b)
+            b.tag = EmojiData.jumpIndices[i] / perPage
+            b.addTarget(self, action: #selector(emojiJumpTapped(_:)), for: .touchUpInside)
+            jumps.addArrangedSubview(b)
+        }
+        mainStack.addArrangedSubview(jumps)
+
+        let slice = Array(all.dropFirst(emojiPage * perPage).prefix(perPage))
+        for r in 0..<4 {
             let row = UIStackView()
             row.axis = .horizontal
             row.distribution = .fillEqually
             row.spacing = keyGap   // zero-gap tiling, like the letter keys
             row.heightAnchor.constraint(equalToConstant: keyRowH).isActive = true
-            for e in emojis {
+            for c in 0..<8 {
+                let idx = r * 8 + c
                 let b = UIButton(type: .system)
-                b.setTitle(e, for: .normal)
-                b.titleLabel?.font = .systemFont(ofSize: 26)
-                b.backgroundColor = keyColor
-                b.layer.cornerRadius = 12
-                outline(b)
-                b.addTarget(self, action: #selector(emojiTouchDown(_:)), for: .touchDown)
-                b.addTarget(self, action: #selector(emojiTouchUp(_:)), for: [.touchUpOutside, .touchCancel])
-                b.addTarget(self, action: #selector(emojiTapped(_:)), for: .touchUpInside)
+                if idx < slice.count {
+                    b.setTitle(slice[idx], for: .normal)
+                    b.titleLabel?.font = .systemFont(ofSize: 26)
+                    b.backgroundColor = keyColor
+                    b.layer.cornerRadius = 12
+                    outline(b)
+                    b.addTarget(self, action: #selector(emojiTouchDown(_:)), for: .touchDown)
+                    b.addTarget(self, action: #selector(emojiTouchUp(_:)), for: [.touchUpOutside, .touchCancel])
+                    b.addTarget(self, action: #selector(emojiTapped(_:)), for: .touchUpInside)
+                } else {
+                    b.backgroundColor = .clear
+                    b.isEnabled = false
+                }
                 row.addArrangedSubview(b)
             }
             mainStack.addArrangedSubview(row)
         }
+
+        // Pager.
+        let pager = UIStackView()
+        pager.axis = .horizontal
+        pager.distribution = .fillEqually
+        pager.spacing = keyGap
+        pager.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        pager.addArrangedSubview(stripButton("⬅", #selector(emojiPrevTapped)))
+        let pageLabel = UILabel()
+        pageLabel.text = "Page \(emojiPage + 1)/\(pages)"
+        pageLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        pageLabel.textColor = .label
+        pageLabel.textAlignment = .center
+        pager.addArrangedSubview(pageLabel)
+        pager.addArrangedSubview(stripButton("➡", #selector(emojiNextTapped)))
+        mainStack.addArrangedSubview(pager)
+
         // Bottom row: ABC back, a space, and delete (hold repeats).
         let row = UIStackView()
         row.axis = .horizontal
@@ -778,27 +845,26 @@ class KeyboardViewController: UIInputViewController {
         addDeleteHold(to: del)
         row.addArrangedSubview(del)
         mainStack.addArrangedSubview(row)
+
+        // The jump strip + pager make this page taller than the letters.
+        heightConstraint.constant = kbBaseHeight + 72
     }
 
-    @objc private func emojiTouchDown(_ sender: UIButton) {
-        sender.backgroundColor = keyPressedColor
+    @objc private func emojiJumpTapped(_ sender: UIButton) {
+        emojiPage = sender.tag
+        buildKeyboard()
     }
 
-    @objc private func emojiTouchUp(_ sender: UIButton) {
-        sender.backgroundColor = keyColor
+    @objc private func emojiPrevTapped() {
+        if emojiPage > 0 { emojiPage -= 1 }
+        buildKeyboard()
     }
 
-    @objc private func emojiTapped(_ sender: UIButton) {
-        sender.backgroundColor = keyColor
-        guard let e = sender.title(for: .normal) else { return }
-        completeWord()          // the word before the emoji is finished
-        localWord = ""
-        pendingVariantKey = nil; pendingBaseChar = nil
-        textDocumentProxy.insertText(e)
-        updateSuggestions()
-        // Stay on the emoji page: Brian may want two or three in a row.
+    @objc private func emojiNextTapped() {
+        let pages = (EmojiData.all.count + 31) / 32
+        if emojiPage < pages - 1 { emojiPage += 1 }
+        buildKeyboard()
     }
-
     private func bottomRow(modeTitle: String, modeAction: Selector) -> UIStackView {
         let row = UIStackView()
         row.axis = .horizontal
@@ -1131,7 +1197,7 @@ class KeyboardViewController: UIInputViewController {
                     localWord = currentWord()
                 }
             }
-            flashBar("Cursor ↔", "arrastra")
+            flashBar("Cursor ↔", "drag")
         case .changed:
             let x = gesture.location(in: bar).x
             trackpadRemainder += x - trackpadLastX
@@ -1375,7 +1441,7 @@ class KeyboardViewController: UIInputViewController {
             arranged.removeFromSuperview()
         }
         if words.isEmpty {
-            let b = stripButton("(sin palabras todavía)", #selector(wordsPanelTapped))
+            let b = stripButton("(no words yet)", #selector(wordsPanelTapped))
             b.isEnabled = false
             variantStrip.addArrangedSubview(b)
         } else {
@@ -1400,7 +1466,7 @@ class KeyboardViewController: UIInputViewController {
             arranged.removeFromSuperview()
         }
         panelStrip.addArrangedSubview(stripButton("⬅", #selector(wordsPrevTapped)))
-        let info = stripButton("Página \(wordsPage + 1)/\(pages) — toca una palabra para borrarla",
+        let info = stripButton("Page \(wordsPage + 1)/\(pages) — tap a word to delete it",
                                 #selector(wordsPanelTapped))
         info.isEnabled = false
         panelStrip.addArrangedSubview(info)
@@ -1575,9 +1641,9 @@ class KeyboardViewController: UIInputViewController {
             arranged.removeFromSuperview()
         }
         variantStrip.addArrangedSubview(stripButton(
-            logEnabled ? "⏺ Grabando SÍ" : "⏺ Grabar NO", #selector(logToggleTapped)))
-        variantStrip.addArrangedSubview(stripButton("📋 Copiar (\(logCount))", #selector(logCopyTapped)))
-        variantStrip.addArrangedSubview(stripButton("🗑 Borrar", #selector(logClearTapped)))
+            logEnabled ? "⏺ Recording YES" : "⏺ Record NO", #selector(logToggleTapped)))
+        variantStrip.addArrangedSubview(stripButton("📋 Copy (\(logCount))", #selector(logCopyTapped)))
+        variantStrip.addArrangedSubview(stripButton("🗑 Erase", #selector(logClearTapped)))
         variantStrip.addArrangedSubview(stripButton(
             lang == "en" ? "🌐 EN" : "🌐 ES", #selector(langToggleTapped)))
         variantStrip.addArrangedSubview(stripButton("🎨 Editor", #selector(editorTapped)))
@@ -1597,7 +1663,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.12 Speed Lab", "")
+        flashBar("MyKeys v0.13 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1664,7 +1730,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func editorPill(_ title: String, on: Bool, action: Selector) -> UIButton {
         let b = UIButton(type: .system)
-        b.setTitle("\(title): \(on ? "S\u{cd}" : "NO")", for: .normal)
+        b.setTitle("\(title): \(on ? "YES" : "NO")", for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
         b.setTitleColor(.label, for: .normal)
         b.backgroundColor = on ? UIColor.systemTeal.withAlphaComponent(0.35)
@@ -1676,7 +1742,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func buildEditor() {
         let head = editorRow(38)
-        let title = editorLabel("🎨 Editor visual")
+        let title = editorLabel("🎨 Visual editor")
         title.font = .systemFont(ofSize: 17, weight: .bold)
         head.addArrangedSubview(title)
         let close = UIButton(type: .system)
@@ -1695,11 +1761,11 @@ class KeyboardViewController: UIInputViewController {
         sw1.addArrangedSubview(editorPill("Popup", on: edPopup, action: #selector(edTogglePopup)))
         let sw2 = editorRow(40)
         sw2.distribution = .fillEqually
-        sw2.addArrangedSubview(editorPill("Sugerencias", on: edSugg, action: #selector(edToggleSugg)))
+        sw2.addArrangedSubview(editorPill("Suggestions", on: edSugg, action: #selector(edToggleSugg)))
         sw2.addArrangedSubview(editorPill("Slide", on: edSlide, action: #selector(edToggleSlide)))
 
         let sH = editorRow(44)
-        let lH = editorLabel("Tamaño")
+        let lH = editorLabel("Key size")
         lH.widthAnchor.constraint(equalToConstant: 86).isActive = true
         sH.addArrangedSubview(lH)
         let sliderH = UISlider()
@@ -1712,7 +1778,7 @@ class KeyboardViewController: UIInputViewController {
         sH.addArrangedSubview(editorHLabel!)
 
         let sG = editorRow(44)
-        let lG = editorLabel("Espacio")
+        let lG = editorLabel("Gap")
         lG.widthAnchor.constraint(equalToConstant: 86).isActive = true
         sG.addArrangedSubview(lG)
         let sliderG = UISlider()
@@ -1726,8 +1792,8 @@ class KeyboardViewController: UIInputViewController {
 
         let sw3 = editorRow(40)
         sw3.distribution = .fillEqually
-        sw3.addArrangedSubview(editorPill("Bordes", on: edBorders, action: #selector(edToggleBorders)))
-        let hint = editorLabel("Vista previa \u{2193}", size: 13)
+        sw3.addArrangedSubview(editorPill("Borders", on: edBorders, action: #selector(edToggleBorders)))
+        let hint = editorLabel("Preview \u{2193}", size: 13)
         hint.textAlignment = .center
         sw3.addArrangedSubview(hint)
 
@@ -1742,7 +1808,7 @@ class KeyboardViewController: UIInputViewController {
         let bottom = editorRow(44)
         bottom.distribution = .fillEqually
         let words = UIButton(type: .system)
-        words.setTitle("📖 Palabras", for: .normal)
+        words.setTitle("📖 Words", for: .normal)
         words.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         words.setTitleColor(.label, for: .normal)
         words.backgroundColor = keyColor
@@ -1750,7 +1816,7 @@ class KeyboardViewController: UIInputViewController {
         words.addTarget(self, action: #selector(editorWordsTapped), for: .touchUpInside)
         bottom.addArrangedSubview(words)
         let done = UIButton(type: .system)
-        done.setTitle("\u{2713} Listo", for: .normal)
+        done.setTitle("\u{2713} Done", for: .normal)
         done.titleLabel?.font = .systemFont(ofSize: 15, weight: .bold)
         done.setTitleColor(.white, for: .normal)
         done.backgroundColor = .systemTeal
@@ -1835,7 +1901,7 @@ class KeyboardViewController: UIInputViewController {
         editorOpen = false
         buildKeyboard()
         hideVariants()
-        flashBar("Editor aplicado \u{2713}", "")
+        flashBar("Editor applied \u{2713}", "")
     }
 
 
@@ -1850,7 +1916,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func buildWordsEditor() {
         let head = editorRow(38)
-        let title = editorLabel("📖 Mis palabras")
+        let title = editorLabel("📖 My words")
         title.font = .systemFont(ofSize: 17, weight: .bold)
         head.addArrangedSubview(title)
         let close = UIButton(type: .system)
@@ -1864,7 +1930,7 @@ class KeyboardViewController: UIInputViewController {
         head.addArrangedSubview(close)
 
         let sub = editorRow(24)
-        let hint = editorLabel("Toca una palabra para borrarla", size: 13)
+        let hint = editorLabel("Tap a word to delete it", size: 13)
         hint.textColor = .secondaryLabel
         sub.addArrangedSubview(hint)
 
@@ -1901,7 +1967,7 @@ class KeyboardViewController: UIInputViewController {
         let pager = editorRow(40)
         pager.distribution = .fillEqually
         pager.addArrangedSubview(stripButton("⬅", #selector(wordsPrevTapped)))
-        let pageLabel = editorLabel("Página \(wordsPage + 1)/\(pages)", size: 14)
+        let pageLabel = editorLabel("Page \(wordsPage + 1)/\(pages)", size: 14)
         pageLabel.textAlignment = .center
         pager.addArrangedSubview(pageLabel)
         pager.addArrangedSubview(stripButton("➡", #selector(wordsNextTapped)))
@@ -1909,7 +1975,7 @@ class KeyboardViewController: UIInputViewController {
         let actions = editorRow(44)
         actions.distribution = .fillEqually
         let add = UIButton(type: .system)
-        add.setTitle("＋ Agregar", for: .normal)
+        add.setTitle("＋ Add", for: .normal)
         add.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         add.setTitleColor(.label, for: .normal)
         add.backgroundColor = keyColor
@@ -1917,7 +1983,7 @@ class KeyboardViewController: UIInputViewController {
         add.addTarget(self, action: #selector(wordsAddTapped), for: .touchUpInside)
         actions.addArrangedSubview(add)
         let wipe = UIButton(type: .system)
-        wipe.setTitle("🗑 Aprendidas", for: .normal)
+        wipe.setTitle("🗑 Learned", for: .normal)
         wipe.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         wipe.setTitleColor(.label, for: .normal)
         wipe.backgroundColor = keyColor
@@ -1927,7 +1993,7 @@ class KeyboardViewController: UIInputViewController {
 
         let doneRow = editorRow(44)
         let done = UIButton(type: .system)
-        done.setTitle("\u{2713} Listo", for: .normal)
+        done.setTitle("\u{2713} Done", for: .normal)
         done.titleLabel?.font = .systemFont(ofSize: 15, weight: .bold)
         done.setTitleColor(.white, for: .normal)
         done.backgroundColor = .systemTeal
@@ -1961,7 +2027,7 @@ class KeyboardViewController: UIInputViewController {
         wordStore.set(bigrams, forKey: bigramKey)
         if logEnabled { logEvent(k: "CFG", m: "wipe-learned", viewPoint: .zero, frame: nil) }
         buildKeyboard()
-        flashBar("Aprendidas borradas", "")
+        flashBar("Learned words cleared", "")
     }
 
     @objc private func wordsAddTapped() {
@@ -1969,7 +2035,7 @@ class KeyboardViewController: UIInputViewController {
         addingWord = true
         buildKeyboard()
         showAddWordStrip()
-        flashBar("Escribe la palabra nueva", "")
+        flashBar("Type the new word", "")
     }
 
     private func showAddWordStrip() {
@@ -1977,8 +2043,8 @@ class KeyboardViewController: UIInputViewController {
             variantStrip.removeArrangedSubview(v)
             v.removeFromSuperview()
         }
-        variantStrip.addArrangedSubview(stripButton("📌 Guardar palabra", #selector(addWordSaveTapped)))
-        variantStrip.addArrangedSubview(stripButton("✕ Cancelar", #selector(addWordCancelTapped)))
+        variantStrip.addArrangedSubview(stripButton("📌 Save word", #selector(addWordSaveTapped)))
+        variantStrip.addArrangedSubview(stripButton("✕ Cancel", #selector(addWordCancelTapped)))
         variantStrip.isHidden = false
         panelStrip?.isHidden = true
         heightConstraint.constant = kbBaseHeight + 47
@@ -1987,7 +2053,7 @@ class KeyboardViewController: UIInputViewController {
     @objc private func addWordSaveTapped() {
         let w = localWord
         guard w.count >= 2 else {
-            flashBar("Escribe la palabra primero", "")
+            flashBar("Type the word first", "")
             return
         }
         personal.insert(w)
@@ -2000,7 +2066,7 @@ class KeyboardViewController: UIInputViewController {
         wordsOpen = true
         wordsPage = max(0, (personal.count - 1) / 18)
         buildKeyboard()
-        flashBar("Guardada: \(w)", "")
+        flashBar("Saved: \(w)", "")
     }
 
     @objc private func addWordCancelTapped() {
@@ -2021,10 +2087,10 @@ class KeyboardViewController: UIInputViewController {
         let text = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
         hideVariants()
         if text.isEmpty {
-            flashBar("Log vacío", "")
+            flashBar("Log empty", "")
         } else {
             UIPasteboard.general.string = text
-            flashBar("✓ Log copiado", "\(logCount) toques")
+            flashBar("✓ Log copied", "\(logCount) touches")
         }
     }
 
@@ -2036,7 +2102,7 @@ class KeyboardViewController: UIInputViewController {
         logCount = 0
         try? "".write(to: logURL, atomically: true, encoding: .utf8)
         hideVariants()
-        flashBar("🗑 Log borrado", "")
+        flashBar("🗑 Log erased", "")
     }
 
     /// Show a two-part message in the suggestion bar for ~1.4s.

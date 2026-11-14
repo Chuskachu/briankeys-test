@@ -53,15 +53,15 @@ struct OptionsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Corrección prudente", isOn: $corrector)
-                Toggle("Popup de la letra al tocar", isOn: $popup)
-                Toggle("Sugerencias", isOn: $sugerencias)
-                Toggle("Slide: arrastrar escribe", isOn: $slide)
+                Toggle("Prudent correction", isOn: $corrector)
+                Toggle("Key popup when tapping", isOn: $popup)
+                Toggle("Suggestions", isOn: $sugerencias)
+                Toggle("Slide: drag to type", isOn: $slide)
             } footer: {
-                Text("Estos ajustes viajan al teclado por el mismo cajón compartido del diccionario. Si un ajuste no se refleja en el teclado, el cajón no se compartió: avísale a Muse.")
+                Text("These settings travel to the keyboard through the same shared drawer as the dictionary. If a setting does not show up on the keyboard, the drawer was not shared: tell Muse.")
             }
         }
-        .navigationTitle("⚙️ Opciones")
+        .navigationTitle("⚙️ Options")
         .onAppear { load() }
         .onChange(of: corrector) { _, _ in save() }
         .onChange(of: popup) { _, _ in save() }
@@ -103,21 +103,21 @@ struct DictionaryView: View {
                     .autocorrectionDisabled(true)
                     .textInputAutocapitalization(.never)
                     .onSubmit { add() }
-                Button("Agregar") { add() }
+                Button("Add") { add() }
                     .buttonStyle(.borderedProminent)
                     .disabled(newWord.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(.horizontal)
 
             if drawerMissing {
-                Text("No se pudo abrir el cajón compartido en esta instalación. Avísale a Muse.")
+                Text("The shared drawer could not be opened on this install. Tell Muse.")
                     .font(.subheadline)
                     .foregroundStyle(.red)
                     .padding(.horizontal)
             }
 
             if words.isEmpty {
-                Text("Todavía no hay palabras tuyas. Agrega la primera arriba, o fija una desde el teclado con long-press en una sugerencia (📌).")
+                Text("You have no words yet. Add your first one above, or pin one from the keyboard with a long-press on a suggestion (📌).")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
@@ -134,13 +134,13 @@ struct DictionaryView: View {
                 .listStyle(.plain)
             }
 
-            Text("Desliza una palabra hacia la izquierda para borrarla. Prueba del cajón: agrega una palabra aquí y fíjate si el teclado te la sugiere.")
+            Text("Swipe a word left to delete it. Drawer test: add a word here and check whether the keyboard suggests it.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)
         }
         .padding(.top)
-        .navigationTitle("📖 Mi diccionario")
+        .navigationTitle("📖 My dictionary")
         .onAppear { load() }
     }
 }
@@ -158,12 +158,12 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.12")
+                        Text("v0.13")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("Actívalo en Ajustes → General → Teclado → Teclados → MyKeys, y no olvides «Permitir acceso total» (lo necesitan los haptics).")
+                    Text("Enable it in Settings → General → Keyboard → Keyboards → MyKeys, and do not forget “Allow Full Access” (the haptics need it).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
@@ -174,7 +174,7 @@ struct ContentView: View {
                         DictionaryView()
                     } label: {
                         HStack {
-                            Text("📖 Mi diccionario personal")
+                            Text("📖 My personal dictionary")
                                 .font(.headline)
                             Spacer()
                             Text("›")
@@ -192,7 +192,7 @@ struct ContentView: View {
                         OptionsView()
                     } label: {
                         HStack {
-                            Text("⚙️ Opciones del teclado")
+                            Text("⚙️ Keyboard options")
                                 .font(.headline)
                             Spacer()
                             Text("›")
@@ -207,15 +207,15 @@ struct ContentView: View {
 
                     Divider()
 
-                    Text("Textos de prueba")
+                    Text("Test texts")
                         .font(.title3)
                         .bold()
 
-                    Text("Escribe cada texto lo más rápido que puedas, aquí mismo con BrianKeys. NO corrijas los typos: los typos son los datos. Al final, «Copiar TODO» y me lo pegas en el chat de una sola vez.")
+                    Text("Type each text as fast as you can, right here with MyKeys. Do NOT fix the typos: the typos are the data. At the end, tap “Copy ALL” and paste it all into the chat in one go.")
                         .font(.body)
 
                     HStack {
-                        Button("📋 Copiar TODO") {
+                        Button("📋 Copy ALL") {
                             var parts = ["MyKeys — resultados de la suite"]
                             for i in testTexts.indices where !attempts[i].isEmpty {
                                 parts.append("\(i + 1). Meta: \(testTexts[i])\n   Intento: \(attempts[i])")
@@ -225,7 +225,7 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(attempts.allSatisfy { $0.isEmpty })
 
-                        Button("Borrar todo") {
+                        Button("Clear all") {
                             attempts = Array(repeating: "", count: testTexts.count)
                         }
                         .buttonStyle(.bordered)
@@ -237,7 +237,7 @@ struct ContentView: View {
                             Text("\(i + 1). \(testTexts[i])")
                                 .font(.headline)
 
-                            TextField("Tu intento…", text: $attempts[i], axis: .vertical)
+                            TextField("Your attempt…", text: $attempts[i], axis: .vertical)
                                 .textFieldStyle(.roundedBorder)
                                 .lineLimit(2...5)
                                 // The test must measure BrianKeys alone, so the
@@ -246,13 +246,13 @@ struct ContentView: View {
                                 .textInputAutocapitalization(.never)
 
                             HStack {
-                                Button("Copiar intento 📋") {
+                                Button("Copy attempt 📋") {
                                     UIPasteboard.general.string = attempts[i]
                                 }
                                 .buttonStyle(.bordered)
                                 .disabled(attempts[i].isEmpty)
 
-                                Button("Borrar") {
+                                Button("Clear") {
                                     attempts[i] = ""
                                 }
                                 .buttonStyle(.bordered)
