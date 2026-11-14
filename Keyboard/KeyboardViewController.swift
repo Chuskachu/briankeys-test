@@ -865,6 +865,25 @@ class KeyboardViewController: UIInputViewController {
         if emojiPage < pages - 1 { emojiPage += 1 }
         buildKeyboard()
     }
+
+    @objc private func emojiTouchDown(_ sender: UIButton) {
+        sender.backgroundColor = keyPressedColor
+    }
+
+    @objc private func emojiTouchUp(_ sender: UIButton) {
+        sender.backgroundColor = keyColor
+    }
+
+    @objc private func emojiTapped(_ sender: UIButton) {
+        sender.backgroundColor = keyColor
+        guard let e = sender.title(for: .normal) else { return }
+        completeWord()          // the word before the emoji is finished
+        localWord = ""
+        pendingVariantKey = nil; pendingBaseChar = nil
+        textDocumentProxy.insertText(e)
+        updateSuggestions()
+        // Stay on the emoji page: Brian may want two or three in a row.
+    }
     private func bottomRow(modeTitle: String, modeAction: Selector) -> UIStackView {
         let row = UIStackView()
         row.axis = .horizontal
