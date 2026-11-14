@@ -442,6 +442,11 @@ class KeyboardViewController: UIInputViewController {
     /// layout inside the same transaction, so the new page lands in a
     /// single frame with nothing in between.
     private func buildKeyboard() {
+        // v0.14 flash attempt #2 (HYPOTHESIS — v0.13's transaction did
+        // not kill the flash): cover the swap with a snapshot of the
+        // page as it is now; the rebuilt page is only revealed on the
+        // next frame, complete, so no intermediate state can show.
+        let cover = view.snapshotView(afterScreenUpdates: false)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         UIView.performWithoutAnimation {
@@ -449,6 +454,11 @@ class KeyboardViewController: UIInputViewController {
             view.layoutIfNeeded()
         }
         CATransaction.commit()
+        if let cover = cover {
+            cover.frame = view.bounds
+            view.addSubview(cover)
+            DispatchQueue.main.async { cover.removeFromSuperview() }
+        }
     }
 
     private func buildKeyboardNow() {
@@ -464,7 +474,9 @@ class KeyboardViewController: UIInputViewController {
         autoShiftIfNeeded()
 
         mainStack.spacing = keyGap
-        mainStack.addArrangedSubview(suggestionBar)
+        // v0.14 (Brian): on the emoji page the suggestion bar is
+        // useless — its space goes to the two category rows instead.
+        if mode != .emoji { mainStack.addArrangedSubview(suggestionBar) }
 
         // Variants strip (hidden until a long-press).
         variantStrip = UIStackView()
@@ -743,35 +755,86 @@ class KeyboardViewController: UIInputViewController {
     // emoji inserts it and the page STAYS open (several in a row is
     // normal); ABC comes back to the letters.
     private var emojiPage = 0
+    // v0.14: sections — 0 = ⭐ Top (most used, then recent), 1...9 =
+    // EmojiData.categories. Usage is tracked locally per emoji tap.
+    private var emojiSection = 0
+    private var emojiCounts: [String: Int] = [:]
+    private var emojiRecents: [String] = []
+    private var emojiUseLoaded = false
+
+    private func ensureEmojiUse() {
+        if emojiUseLoaded { return }
+        emojiUseLoaded = true
+        emojiCounts = wordStore.dictionary(forKey: "bk_emoji_counts_v1") as? [String: Int] ?? [:]
+        emojiRecents = wordStore.array(forKey: "bk_emoji_recents_v1") as? [String] ?? []
+    }
+
+    private func recordEmojiUse(_ e: String) {
+        ensureEmojiUse()
+        emojiCounts[e, default: 0] += 1
+        emojiRecents.removeAll { $0 == e }
+        emojiRecents.insert(e, at: 0)
+        if emojiRecents.count > 96 { emojiRecents = Array(emojiRecents.prefix(96)) }
+        wordStore.set(emojiCounts, forKey: "bk_emoji_counts_v1")
+        wordStore.set(emojiRecents, forKey: "bk_emoji_recents_v1")
+    }
+
+    /// ⭐ Top (Brian's order): most used first, then recently used
+    /// ones that are not already in the most-used list.
+    private func topEmojis() -> [String] {
+        ensureEmojiUse()
+        let most = emojiCounts.sorted { a, b in
+            if a.value != b.value { return a.value > b.value }
+            return (emojiRecents.firstIndex(of: a.key) ?? 999) < (emojiRecents.firstIndex(of: b.key) ?? 999)
+        }.prefix(64).map { $0.key }
+        let mostSet = Set(most)
+        let rest = emojiRecents.filter { !mostSet.contains($0) }
+        let combined = Array((most + rest).prefix(96))
+        if !combined.isEmpty { return combined }
+        return ["😀", "😂", "😍", "😎", "🤔", "👍", "❤️", "🔥", "🙏", "🎉", "😅", "🤓", "😊", "🥹", "😴", "🤯"]
+    }
+
+    private func emojiItems() -> [String] {
+        if emojiSection == 0 { return topEmojis() }
+        let cats = EmojiData.categories
+        let i = min(max(0, emojiSection - 1), cats.count - 1)
+        let start = cats[i].start
+        let end = i + 1 < cats.count ? cats[i + 1].start : EmojiData.all.count
+        return Array(EmojiData.all[start..<end])
+    }
 
     private func buildEmoji() {
-        // v0.13 (Brian): the FULL emoji set (EmojiData: 3,963) with a
-        // category jump strip and paging — the old page had 32.
-        let all = EmojiData.all
+        // v0.14 (Brian): TWO rows of big category buttons where the
+        // suggestion bar used to be — ⭐ Top first (most used, then
+        // recent), then the 9 Unicode categories. 32 emojis per page.
+        let items = emojiItems()
         let perPage = 32
-        let pages = (all.count + perPage - 1) / perPage
+        let pages = max(1, (items.count + perPage - 1) / perPage)
         emojiPage = min(max(0, emojiPage), pages - 1)
 
-        // Category jumps.
-        let jumps = UIStackView()
-        jumps.axis = .horizontal
-        jumps.distribution = .fillEqually
-        jumps.spacing = keyGap
-        jumps.heightAnchor.constraint(equalToConstant: 36).isActive = true
-        for (i, label) in EmojiData.jumpLabels.enumerated() {
-            let b = UIButton(type: .system)
-            b.setTitle(label, for: .normal)
-            b.titleLabel?.font = .systemFont(ofSize: 20)
-            b.backgroundColor = keyColor
-            b.layer.cornerRadius = 8
-            outline(b)
-            b.tag = EmojiData.jumpIndices[i] / perPage
-            b.addTarget(self, action: #selector(emojiJumpTapped(_:)), for: .touchUpInside)
-            jumps.addArrangedSubview(b)
+        let catDefs: [(String, String)] = [("⭐", "Top")] + EmojiData.categories.map { ($0.icon, $0.label) }
+        for rowIdx in 0..<2 {
+            let row = UIStackView()
+            row.axis = .horizontal
+            row.distribution = .fillEqually
+            row.spacing = keyGap
+            row.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            for i in (rowIdx * 5)..<min(rowIdx * 5 + 5, catDefs.count) {
+                let b = UIButton(type: .system)
+                b.setTitle("\(catDefs[i].0) \(catDefs[i].1)", for: .normal)
+                b.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+                b.setTitleColor(.label, for: .normal)
+                b.backgroundColor = i == emojiSection ? UIColor.systemOrange.withAlphaComponent(0.35) : keyColor
+                b.layer.cornerRadius = 8
+                outline(b)
+                b.tag = i
+                b.addTarget(self, action: #selector(emojiCategoryTapped(_:)), for: .touchUpInside)
+                row.addArrangedSubview(b)
+            }
+            mainStack.addArrangedSubview(row)
         }
-        mainStack.addArrangedSubview(jumps)
 
-        let slice = Array(all.dropFirst(emojiPage * perPage).prefix(perPage))
+        let slice = Array(items.dropFirst(emojiPage * perPage).prefix(perPage))
         for r in 0..<4 {
             let row = UIStackView()
             row.axis = .horizontal
@@ -846,12 +909,14 @@ class KeyboardViewController: UIInputViewController {
         row.addArrangedSubview(del)
         mainStack.addArrangedSubview(row)
 
-        // The jump strip + pager make this page taller than the letters.
-        heightConstraint.constant = kbBaseHeight + 72
+        // Two category rows + pager make this page taller than letters
+        // (and the suggestion bar is hidden here, which buys some back).
+        heightConstraint.constant = kbBaseHeight + 84
     }
 
-    @objc private func emojiJumpTapped(_ sender: UIButton) {
-        emojiPage = sender.tag
+    @objc private func emojiCategoryTapped(_ sender: UIButton) {
+        emojiSection = sender.tag
+        emojiPage = 0
         buildKeyboard()
     }
 
@@ -861,7 +926,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func emojiNextTapped() {
-        let pages = (EmojiData.all.count + 31) / 32
+        let pages = max(1, (emojiItems().count + 31) / 32)
         if emojiPage < pages - 1 { emojiPage += 1 }
         buildKeyboard()
     }
@@ -881,6 +946,7 @@ class KeyboardViewController: UIInputViewController {
         localWord = ""
         pendingVariantKey = nil; pendingBaseChar = nil
         textDocumentProxy.insertText(e)
+        recordEmojiUse(e)
         updateSuggestions()
         // Stay on the emoji page: Brian may want two or three in a row.
     }
@@ -1682,7 +1748,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.13 Speed Lab", "")
+        flashBar("MyKeys v0.14 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
