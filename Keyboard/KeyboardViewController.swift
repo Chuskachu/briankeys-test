@@ -392,10 +392,32 @@ class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         refreshSettings()   // v0.9: pick up switches he flipped in the app
+        applyAppAppearance()   // v0.17: match the app's requested look
+    }
+
+    /// v0.17 (Brian): first the app, then iOS — like Apple's keyboard.
+    /// The app declares the appearance it wants on its text field and
+    /// the proxy carries it here; a third-party keyboard has to READ
+    /// it and re-skin itself (MyKeys never did, so it fell back to the
+    /// phone's own mode and clashed with light-locked apps). When the
+    /// app declares nothing (.default), follow the phone as before.
+    /// Changing the override fires traitCollectionDidChange, which
+    /// already rebuilds with fresh colours.
+    private func applyAppAppearance() {
+        let want: UIUserInterfaceStyle
+        switch textDocumentProxy.keyboardAppearance {
+        case .dark: want = .dark
+        case .light: want = .light
+        default: want = .unspecified
+        }
+        if overrideUserInterfaceStyle != want {
+            overrideUserInterfaceStyle = want
+        }
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        applyAppAppearance()   // v0.17: the field (and its look) can change under us
         autoShiftIfNeeded()
         // If the proxy's word disagrees with our mirror, the change came
         // from outside: adopt it and refresh the bar. When they agree,
@@ -1815,7 +1837,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.16 Speed Lab", "")
+        flashBar("MyKeys v0.17 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
