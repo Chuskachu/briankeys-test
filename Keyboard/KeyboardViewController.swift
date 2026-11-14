@@ -213,7 +213,6 @@ class KeyboardViewController: UIInputViewController {
     /// visual editor, for his OWN words only (the old 5-per-page panel
     /// mixed ~750 learned words in and was useless for managing them).
     private var wordsOpen = false
-    private var wordsPage = 0
     private var addingWord = false
     private var editorPreview: UIStackView?
     private var editorHLabel: UILabel?
@@ -1411,16 +1410,17 @@ class KeyboardViewController: UIInputViewController {
         heightConstraint.constant = kbBaseHeight + 106
     }
 
+    // v0.12: these two handlers, born with the old 5-per-page panel,
+    // now page the big words editor (18 per page).
     @objc private func wordsPrevTapped() {
-        let pages = max(1, (allPersonalWords().count + 4) / 5)
-        wordsPage = (wordsPage - 1 + pages) % pages
-        showWordsPanel()
+        if wordsPage > 0 { wordsPage -= 1 }
+        if wordsOpen { buildKeyboard() } else { showWordsPanel() }
     }
 
     @objc private func wordsNextTapped() {
-        let pages = max(1, (allPersonalWords().count + 4) / 5)
-        wordsPage = (wordsPage + 1) % pages
-        showWordsPanel()
+        let pages = max(1, (personal.count + 17) / 18)
+        if wordsPage < pages - 1 { wordsPage += 1 }
+        if wordsOpen { buildKeyboard() } else { showWordsPanel() }
     }
 
     @objc private func wordChipTapped(_ sender: UIButton) {
@@ -1949,17 +1949,6 @@ class KeyboardViewController: UIInputViewController {
         personal.remove(w)
         wordStore.set(Array(personal), forKey: personalKey)
         if logEnabled { logEvent(k: "CFG", m: "word-del", viewPoint: .zero, frame: nil) }
-        buildKeyboard()
-    }
-
-    @objc private func wordsPrevTapped() {
-        if wordsPage > 0 { wordsPage -= 1 }
-        buildKeyboard()
-    }
-
-    @objc private func wordsNextTapped() {
-        let pages = max(1, (personal.count + 17) / 18)
-        if wordsPage < pages - 1 { wordsPage += 1 }
         buildKeyboard()
     }
 
