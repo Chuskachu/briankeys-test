@@ -129,6 +129,8 @@ class KeyboardViewController: UIInputViewController {
     // Every other generator is gone (Brian: the pulse arrives after the
     // touch and the brain reads that delay as a slow keyboard).
     private let hapticHeavy = UIImpactFeedbackGenerator(style: .heavy)
+    private let hapticMedium = UIImpactFeedbackGenerator(style: .medium)
+    private let hapticLight = UIImpactFeedbackGenerator(style: .light)
     private var letterButtons: [KeyButton] = []
     private var shiftButton: KeyButton?
     /// The key whose character was just inserted on touch-down, so a
@@ -177,6 +179,10 @@ class KeyboardViewController: UIInputViewController {
         keyRowH = CGFloat(min(66, max(46, settingInt(keyHKey, default: 56))))
         keyGap = CGFloat(min(6, max(0, settingInt(keyGapKey, default: 0))))
         bordersOn = settingBool(bordersKey, default: true)
+        keyFont = CGFloat(min(30, max(18, settingInt(fontKey, default: 22))))
+        themeName = wordStore.string(forKey: themeKey)
+            ?? UserDefaults.standard.string(forKey: themeKey) ?? "auto"
+        spaceHaptic = min(2, max(0, settingInt(hapticKey, default: 2)))
     }
     /// v0.6 (Brian): personal dictionary — words he pins himself
     /// (long-press a suggestion chip). They outrank learned words.
@@ -203,13 +209,22 @@ class KeyboardViewController: UIInputViewController {
     private let keyHKey = "bk_key_h_v1"
     private let keyGapKey = "bk_key_gap_v1"
     private let bordersKey = "bk_borders_v1"
+    private let fontKey = "bk_font_v1"
+    private let themeKey = "bk_theme_v1"
+    private let hapticKey = "bk_haptic_v1"
     private var keyRowH: CGFloat = 56
     private var keyGap: CGFloat = 0
     private var bordersOn: Bool = true
+    // v0.18 customization (Brian's picks): letter size, colour theme,
+    // space-bar haptic strength.
+    private var keyFont: CGFloat = 22
+    private var themeName: String = "auto"   // auto | light | dark | contrast
+    private var spaceHaptic: Int = 2         // 0 soft, 1 medium, 2 strong
     private var editorOpen = false
     // Staged editor values: nothing persists until he taps Listo.
     private var edPrudent = false, edPopup = true, edSugg = true, edSlide = true
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
+    private var edFont: CGFloat = 22, edTheme = "auto", edHaptic = 2
     /// v0.12 (Brian): the big words editor — a full page like the
     /// visual editor, for his OWN words only (the old 5-per-page panel
     /// mixed ~750 learned words in and was useless for managing them).
@@ -218,6 +233,7 @@ class KeyboardViewController: UIInputViewController {
     private var editorPreview: UIStackView?
     private var editorHLabel: UILabel?
     private var editorGapLabel: UILabel?
+    private var editorFontLabel: UILabel?
     /// Total keyboard height at the current key size/gaps, anchored on
     /// the known-good 315 at 56pt rows with zero gap.
     private var kbBaseHeight: CGFloat { 315 + (keyRowH - 56) * 4 + keyGap * 3 }
@@ -348,11 +364,7 @@ class KeyboardViewController: UIInputViewController {
         mainStack.distribution = .fill
         mainStack.spacing = 0   // v0.4: ZERO gaps between key rows (Brian's idea)
         // The tray shows through the rounded corners of the touching keys.
-        view.backgroundColor = UIColor { traits in
-            traits.userInterfaceStyle == .dark
-                ? UIColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 1)
-                : UIColor(red: 0.82, green: 0.83, blue: 0.86, alpha: 1)
-        }
+        applyTrayColor()
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(mainStack)
         NSLayoutConstraint.activate([
@@ -372,7 +384,7 @@ class KeyboardViewController: UIInputViewController {
         chips = (0..<3).map { i in
             let c = UIButton(type: .system)
             c.titleLabel?.font = .systemFont(ofSize: 17, weight: .medium)
-            c.setTitleColor(.label, for: .normal)
+            c.setTitleColor(keyTitleColor, for: .normal)
             c.backgroundColor = keyColor
             c.layer.cornerRadius = 8
             c.tag = i
@@ -393,6 +405,14 @@ class KeyboardViewController: UIInputViewController {
         super.viewWillAppear(animated)
         refreshSettings()   // v0.9: pick up switches he flipped in the app
         applyAppAppearance()   // v0.17: match the app's requested look
+        applyTrayColor()   // v0.18: themeName is fresh from refreshSettings now
+        // v0.18: cached pages keep the colours of whenever they were
+        // built. If the light/dark flip happened while the keyboard was
+        // closed, traitCollectionDidChange never fires and a cached page
+        // (Brian saw the numbers page stay WHITE in a dark app) keeps the
+        // old look. Rebuilding once per open keeps pages consistent;
+        // the cache still serves switches within the session.
+        pageCache.removeAll()
     }
 
     /// v0.17 (Brian): first the app, then iOS — like Apple's keyboard.
@@ -405,13 +425,33 @@ class KeyboardViewController: UIInputViewController {
     /// already rebuilds with fresh colours.
     private func applyAppAppearance() {
         let want: UIUserInterfaceStyle
-        switch textDocumentProxy.keyboardAppearance {
-        case .dark: want = .dark
-        case .light: want = .light
-        default: want = .unspecified
+        // v0.18: a theme Brian picked himself beats the app's request.
+        switch themeName {
+        case "light": want = .light
+        case "dark", "contrast": want = .dark
+        default:
+            switch textDocumentProxy.keyboardAppearance {
+            case .dark: want = .dark
+            case .light: want = .light
+            default: want = .unspecified
+            }
         }
         if overrideUserInterfaceStyle != want {
             overrideUserInterfaceStyle = want
+        }
+    }
+
+    /// v0.18: the tray behind the keys — black on the contrast theme,
+    /// the usual iPhone tray grey otherwise.
+    private func applyTrayColor() {
+        if themeName == "contrast" {
+            view.backgroundColor = .black
+        } else {
+            view.backgroundColor = UIColor { traits in
+                traits.userInterfaceStyle == .dark
+                    ? UIColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 1)
+                    : UIColor(red: 0.82, green: 0.83, blue: 0.86, alpha: 1)
+            }
         }
     }
 
@@ -595,25 +635,32 @@ class KeyboardViewController: UIInputViewController {
 
     // v0.3: iPhone-style palette (Brian asked for Apple's look): white
     // keycaps in light mode, mid-grey in dark mode, grey function keys.
+    /// v0.18: on the contrast theme the keys are white/yellow, so their
+    /// text stays black even though the traits run dark.
+    private var keyTitleColor: UIColor { themeName == "contrast" ? .black : .label }
     private var keyColor: UIColor {
-        UIColor { t in t.userInterfaceStyle == .dark
+        if themeName == "contrast" { return UIColor(red: 1, green: 1, blue: 1, alpha: 1) }
+        return UIColor { t in t.userInterfaceStyle == .dark
             ? UIColor(red: 0.36, green: 0.36, blue: 0.38, alpha: 1)
             : UIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1) }
     }
     private var functionKeyColor: UIColor {
-        UIColor { t in t.userInterfaceStyle == .dark
+        if themeName == "contrast" { return UIColor(red: 1.0, green: 0.84, blue: 0.10, alpha: 1) }
+        return UIColor { t in t.userInterfaceStyle == .dark
             ? UIColor(red: 0.20, green: 0.20, blue: 0.22, alpha: 1)
             : UIColor(red: 0.66, green: 0.68, blue: 0.72, alpha: 1) }
     }
     // Pressed-state colours: keys visibly react the instant they are
     // touched — part of "responde lento" was that nothing SEEMED to happen.
     private var keyPressedColor: UIColor {
-        UIColor { t in t.userInterfaceStyle == .dark
+        if themeName == "contrast" { return UIColor(white: 0.80, alpha: 1) }
+        return UIColor { t in t.userInterfaceStyle == .dark
             ? UIColor(red: 0.52, green: 0.52, blue: 0.55, alpha: 1)
             : UIColor(red: 0.84, green: 0.85, blue: 0.87, alpha: 1) }
     }
     private var functionPressedColor: UIColor {
-        UIColor { t in t.userInterfaceStyle == .dark
+        if themeName == "contrast" { return UIColor(red: 0.85, green: 0.68, blue: 0.05, alpha: 1) }
+        return UIColor { t in t.userInterfaceStyle == .dark
             ? UIColor(red: 0.30, green: 0.30, blue: 0.32, alpha: 1)
             : UIColor(red: 0.52, green: 0.54, blue: 0.58, alpha: 1) }
     }
@@ -667,8 +714,8 @@ class KeyboardViewController: UIInputViewController {
         let display = (shift == .off) ? char : char.uppercased()
         let b = KeyButton(type: .system)
         b.setTitle(display, for: .normal)
-        b.titleLabel?.font = .systemFont(ofSize: 22, weight: .medium)
-        b.setTitleColor(.label, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: keyFont, weight: .medium)
+        b.setTitleColor(keyTitleColor, for: .normal)
         paint(b, normal: keyColor, pressed: keyPressedColor)
         b.layer.cornerRadius = 12
         outline(b)
@@ -692,7 +739,7 @@ class KeyboardViewController: UIInputViewController {
         let b = KeyButton(type: .system)
         b.setTitle(title, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
-        b.setTitleColor(.label, for: .normal)
+        b.setTitleColor(keyTitleColor, for: .normal)
         paint(b, normal: functionKeyColor, pressed: functionPressedColor)
         b.layer.cornerRadius = 12
         outline(b)
@@ -715,12 +762,22 @@ class KeyboardViewController: UIInputViewController {
         // All other keys are silent: at Brian's speed the pulse lands
         // after the letter and reads as lag, not as feel.
         guard sender.haptic == .heavySpace else { return }
-        hapticHeavy.impactOccurred(intensity: 0.85)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
-            self?.hapticHeavy.impactOccurred(intensity: 0.55)
-            self?.hapticHeavy.prepare()
+        // v0.18: Brian picks the strength in the editor (Haptic pill).
+        switch spaceHaptic {
+        case 0:
+            hapticLight.impactOccurred(intensity: 0.8)
+            hapticLight.prepare()
+        case 1:
+            hapticMedium.impactOccurred(intensity: 0.9)
+            hapticMedium.prepare()
+        default:
+            hapticHeavy.impactOccurred(intensity: 0.85)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+                self?.hapticHeavy.impactOccurred(intensity: 0.55)
+                self?.hapticHeavy.prepare()
+            }
+            hapticHeavy.prepare()
         }
-        hapticHeavy.prepare()
     }
 
     private func addLongPress(to button: KeyButton) {
@@ -912,7 +969,7 @@ class KeyboardViewController: UIInputViewController {
                 let b = UIButton(type: .system)
                 b.setTitle("\(catDefs[i].0) \(catDefs[i].1)", for: .normal)
                 b.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
-                b.setTitleColor(.label, for: .normal)
+                b.setTitleColor(keyTitleColor, for: .normal)
                 b.backgroundColor = i == emojiSection ? UIColor.systemOrange.withAlphaComponent(0.35) : keyColor
                 b.layer.cornerRadius = 8
                 outline(b)
@@ -979,7 +1036,7 @@ class KeyboardViewController: UIInputViewController {
         let space = KeyButton(type: .system)
         space.setTitle("space", for: .normal)
         space.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
-        space.setTitleColor(.label, for: .normal)
+        space.setTitleColor(keyTitleColor, for: .normal)
         paint(space, normal: keyColor, pressed: keyPressedColor)
         space.layer.cornerRadius = 12
         outline(space)
@@ -1006,17 +1063,23 @@ class KeyboardViewController: UIInputViewController {
     @objc private func emojiCategoryTapped(_ sender: UIButton) {
         emojiSection = sender.tag
         emojiPage = 0
+        // v0.18: without this, the v0.15 page cache reattaches the OLD
+        // emoji page and the tap looks dead — category and page taps
+        // must force a fresh buildEmoji, same as recordEmojiUse does.
+        emojiStale = true
         buildKeyboard()
     }
 
     @objc private func emojiPrevTapped() {
         if emojiPage > 0 { emojiPage -= 1 }
+        emojiStale = true   // v0.18: beat the page cache, see emojiCategoryTapped
         buildKeyboard()
     }
 
     @objc private func emojiNextTapped() {
         let pages = max(1, (emojiItems().count + 31) / 32)
         if emojiPage < pages - 1 { emojiPage += 1 }
+        emojiStale = true   // v0.18: beat the page cache, see emojiCategoryTapped
         buildKeyboard()
     }
 
@@ -1074,7 +1137,7 @@ class KeyboardViewController: UIInputViewController {
         let space = KeyButton(type: .system)
         space.setTitle("space", for: .normal)
         space.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
-        space.setTitleColor(.label, for: .normal)
+        space.setTitleColor(keyTitleColor, for: .normal)
         paint(space, normal: keyColor, pressed: keyPressedColor)
         space.layer.cornerRadius = 12
         outline(space)
@@ -1837,7 +1900,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.17 Speed Lab", "")
+        flashBar("MyKeys v0.18 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1880,6 +1943,7 @@ class KeyboardViewController: UIInputViewController {
         edPrudent = prudentEnabled; edPopup = popupEnabled
         edSugg = suggEnabled; edSlide = slideOn
         edH = keyRowH; edGap = keyGap; edBorders = bordersOn
+        edFont = keyFont; edTheme = themeName; edHaptic = spaceHaptic
         editorOpen = true
         buildKeyboard()
     }
@@ -1964,6 +2028,25 @@ class KeyboardViewController: UIInputViewController {
         editorGapLabel!.widthAnchor.constraint(equalToConstant: 30).isActive = true
         sG.addArrangedSubview(editorGapLabel!)
 
+        // v0.18 (Brian's picks): letter size, theme, space haptic.
+        let sF = editorRow(44)
+        let lF = editorLabel("Letter size")
+        lF.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        sF.addArrangedSubview(lF)
+        let sliderF = UISlider()
+        sliderF.minimumValue = 18; sliderF.maximumValue = 30
+        sliderF.value = Float(edFont)
+        sliderF.addTarget(self, action: #selector(edFontChanged(_:)), for: .valueChanged)
+        sF.addArrangedSubview(sliderF)
+        editorFontLabel = editorLabel("\(Int(edFont))")
+        editorFontLabel!.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        sF.addArrangedSubview(editorFontLabel!)
+
+        let sw4 = editorRow(40)
+        sw4.distribution = .fillEqually
+        sw4.addArrangedSubview(editorCyclePill("Theme: \(themeLabel(edTheme))", action: #selector(edCycleTheme)))
+        sw4.addArrangedSubview(editorCyclePill("Haptic: \(hapticLabel(edHaptic))", action: #selector(edCycleHaptic)))
+
         let sw3 = editorRow(40)
         sw3.distribution = .fillEqually
         sw3.addArrangedSubview(editorPill("Borders", on: edBorders, action: #selector(edToggleBorders)))
@@ -1998,7 +2081,49 @@ class KeyboardViewController: UIInputViewController {
         done.addTarget(self, action: #selector(editorDoneTapped), for: .touchUpInside)
         bottom.addArrangedSubview(done)
 
-        heightConstraint.constant = kbBaseHeight + 106
+        heightConstraint.constant = kbBaseHeight + 230
+    }
+
+    private func themeLabel(_ t: String) -> String {
+        switch t {
+        case "light": return "Light"
+        case "dark": return "Dark"
+        case "contrast": return "Contrast"
+        default: return "Auto"
+        }
+    }
+
+    private func hapticLabel(_ h: Int) -> String {
+        h == 0 ? "Soft" : (h == 1 ? "Medium" : "Strong")
+    }
+
+    private func editorCyclePill(_ title: String, action: Selector) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setTitle(title, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        b.setTitleColor(.label, for: .normal)
+        b.backgroundColor = .tertiarySystemBackground
+        b.layer.cornerRadius = 8
+        b.addTarget(self, action: action, for: .touchUpInside)
+        return b
+    }
+
+    @objc private func edCycleTheme() {
+        edTheme = edTheme == "auto" ? "light"
+            : edTheme == "light" ? "dark"
+            : edTheme == "dark" ? "contrast" : "auto"
+        buildKeyboard()
+    }
+
+    @objc private func edCycleHaptic() {
+        edHaptic = (edHaptic + 1) % 3
+        buildKeyboard()
+    }
+
+    @objc private func edFontChanged(_ sender: UISlider) {
+        edFont = CGFloat(Int(sender.value.rounded()))
+        editorFontLabel?.text = "\(Int(edFont))"
+        refillEditorPreview()
     }
 
     private func refillEditorPreview() {
@@ -2012,7 +2137,7 @@ class KeyboardViewController: UIInputViewController {
         for ch in ["Q", "W", "E", "R", "T", "Y"] {
             let b = UIButton(type: .system)
             b.setTitle(ch, for: .normal)
-            b.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+            b.titleLabel?.font = .systemFont(ofSize: edFont, weight: .medium)
             b.setTitleColor(.label, for: .normal)
             b.backgroundColor = keyColor
             b.layer.cornerRadius = 12
@@ -2058,6 +2183,7 @@ class KeyboardViewController: UIInputViewController {
         prudentEnabled = edPrudent; popupEnabled = edPopup
         suggEnabled = edSugg; slideOn = edSlide
         keyRowH = edH; keyGap = edGap; bordersOn = edBorders
+        keyFont = edFont; themeName = edTheme; spaceHaptic = edHaptic
         // Saved in BOTH of the keyboard's own stores, like the language
         // flip: the keyboard always reads its own last word (v0.11).
         for (key, val) in [(prudentKey, edPrudent), (popupKey, edPopup),
@@ -2070,6 +2196,14 @@ class KeyboardViewController: UIInputViewController {
         UserDefaults.standard.set(Int(edH), forKey: keyHKey)
         wordStore.set(Int(edGap), forKey: keyGapKey)
         UserDefaults.standard.set(Int(edGap), forKey: keyGapKey)
+        wordStore.set(Int(edFont), forKey: fontKey)
+        UserDefaults.standard.set(Int(edFont), forKey: fontKey)
+        wordStore.set(edTheme, forKey: themeKey)
+        UserDefaults.standard.set(edTheme, forKey: themeKey)
+        wordStore.set(edHaptic, forKey: hapticKey)
+        UserDefaults.standard.set(edHaptic, forKey: hapticKey)
+        applyAppAppearance()   // v0.18: a new theme takes effect at once
+        applyTrayColor()
         if !popupEnabled { hidePopup() }
         if logEnabled { logEvent(k: "CFG", m: "editor-done", viewPoint: .zero, frame: nil) }
         editorOpen = false
@@ -2129,7 +2263,7 @@ class KeyboardViewController: UIInputViewController {
                 if idx < slice.count {
                     b.setTitle(slice[idx], for: .normal)
                     b.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
-                    b.setTitleColor(.label, for: .normal)
+                    b.setTitleColor(keyTitleColor, for: .normal)
                     b.backgroundColor = keyColor
                     b.layer.cornerRadius = 8
                     if bordersOn { outline(b) }
