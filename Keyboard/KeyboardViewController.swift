@@ -183,6 +183,7 @@ class KeyboardViewController: UIInputViewController {
         themeName = wordStore.string(forKey: themeKey)
             ?? UserDefaults.standard.string(forKey: themeKey) ?? "auto"
         spaceHaptic = min(2, max(0, settingInt(hapticKey, default: 2)))
+        chipFont = CGFloat(min(24, max(13, settingInt(chipFontKey, default: 17))))
     }
     /// v0.6 (Brian): personal dictionary — words he pins himself
     /// (long-press a suggestion chip). They outrank learned words.
@@ -212,6 +213,7 @@ class KeyboardViewController: UIInputViewController {
     private let fontKey = "bk_font_v1"
     private let themeKey = "bk_theme_v1"
     private let hapticKey = "bk_haptic_v1"
+    private let chipFontKey = "bk_chipfont_v1"
     private var keyRowH: CGFloat = 56
     private var keyGap: CGFloat = 0
     private var bordersOn: Bool = true
@@ -220,11 +222,13 @@ class KeyboardViewController: UIInputViewController {
     private var keyFont: CGFloat = 22
     private var themeName: String = "auto"   // auto | light | dark | contrast
     private var spaceHaptic: Int = 2         // 0 soft, 1 medium, 2 strong
+    private var chipFont: CGFloat = 17       // v0.19: suggestion-chip text size
     private var editorOpen = false
     // Staged editor values: nothing persists until he taps Listo.
     private var edPrudent = false, edPopup = true, edSugg = true, edSlide = true
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
     private var edFont: CGFloat = 22, edTheme = "auto", edHaptic = 2
+    private var edChipFont: CGFloat = 17
     /// v0.12 (Brian): the big words editor — a full page like the
     /// visual editor, for his OWN words only (the old 5-per-page panel
     /// mixed ~750 learned words in and was useless for managing them).
@@ -234,9 +238,11 @@ class KeyboardViewController: UIInputViewController {
     private var editorHLabel: UILabel?
     private var editorGapLabel: UILabel?
     private var editorFontLabel: UILabel?
+    private var editorChipFontLabel: UILabel?
     /// Total keyboard height at the current key size/gaps, anchored on
     /// the known-good 315 at 56pt rows with zero gap.
-    private var kbBaseHeight: CGFloat { 315 + (keyRowH - 56) * 4 + keyGap * 3 }
+    // v0.19: +34 — the suggestion bar is now TWO rows (78pt, was 44).
+    private var kbBaseHeight: CGFloat { 349 + (keyRowH - 56) * 4 + keyGap * 3 }
     func settingInt(_ key: String, default def: Int) -> Int {
         if let v = wordStore.object(forKey: key) as? Int { return v }
         if let v = UserDefaults.standard.object(forKey: key) as? Int { return v }
@@ -274,6 +280,12 @@ class KeyboardViewController: UIInputViewController {
     private var suggestionBar: UIStackView!
     private var chips: [UIButton] = []
     private var currentSuggestions: [String] = []
+    // v0.19: iOS's own spell checker, consulted for its guesses (see
+    // computeSuggestions). Cached per word — it talks to the system
+    // lexicon service, so we never ask twice for the same word.
+    private let textChecker = UITextChecker()
+    private var checkerCacheWord = ""
+    private var checkerCache: [String] = []
 
     /// His own words — in no dictionary, top priority (design phase 3
     /// seeds; the in-app manager comes later).
@@ -377,13 +389,24 @@ class KeyboardViewController: UIInputViewController {
         // The suggestion bar is a persistent view, re-added on every
         // rebuild (clearStack wipes the stack's arranged subviews).
         suggestionBar = UIStackView()
-        suggestionBar.axis = .horizontal
-        suggestionBar.distribution = .fillEqually
+        // v0.19 (Brian): TWO thinner rows of chips instead of one —
+        // 6 suggestions instead of 3, so pairs like grabo/grabó fit.
+        suggestionBar.axis = .vertical
+        suggestionBar.distribution = .fill
         suggestionBar.spacing = 6
-        suggestionBar.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        chips = (0..<3).map { i in
+        suggestionBar.heightAnchor.constraint(equalToConstant: 78).isActive = true
+        let chipRows: [UIStackView] = (0..<2).map { _ in
+            let r = UIStackView()
+            r.axis = .horizontal
+            r.distribution = .fillEqually
+            r.spacing = 6
+            r.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            suggestionBar.addArrangedSubview(r)
+            return r
+        }
+        chips = (0..<6).map { i in
             let c = UIButton(type: .system)
-            c.titleLabel?.font = .systemFont(ofSize: 17, weight: .medium)
+            c.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium)
             c.setTitleColor(keyTitleColor, for: .normal)
             c.backgroundColor = keyColor
             c.layer.cornerRadius = 8
@@ -394,7 +417,7 @@ class KeyboardViewController: UIInputViewController {
             let chipLP = UILongPressGestureRecognizer(target: self, action: #selector(chipLongPressed(_:)))
             chipLP.minimumPressDuration = 0.45
             c.addGestureRecognizer(chipLP)
-            suggestionBar.addArrangedSubview(c)
+            chipRows[i / 3].addArrangedSubview(c)
             return c
         }
 
@@ -413,6 +436,15 @@ class KeyboardViewController: UIInputViewController {
         // old look. Rebuilding once per open keeps pages consistent;
         // the cache still serves switches within the session.
         pageCache.removeAll()
+        // v0.19: the LETTERS page is baked once in viewDidLoad — before
+        // applyAppAppearance ever reads the app's declared look — and no
+        // path repainted it afterwards, so it kept the phone's style
+        // while pages built later (numbers) followed the app. That is
+        // Brian's "dark in letters, light in numbers" in BOTH v0.17 and
+        // v0.18. Repaint the visible page now that the look is settled.
+        // buildKeyboardNow, NOT buildKeyboard: the snapshot cover is
+        // pointless (and possibly a blank flash) before first layout.
+        buildKeyboardNow()
     }
 
     /// v0.17 (Brian): first the app, then iOS — like Apple's keyboard.
@@ -463,6 +495,19 @@ class KeyboardViewController: UIInputViewController {
         // from outside: adopt it and refresh the bar. When they agree,
         // our own action handler already updated it — this is what keeps
         // suggestions at ONE compute per keystroke (v0.2 diet).
+        let proxyWord = currentWord()
+        if proxyWord != localWord {
+            localWord = proxyWord
+            updateSuggestions()
+        }
+    }
+
+    /// v0.19 (Brian): he taps back into an earlier word to fix it and
+    /// the bar showed nothing for it — cursor MOVES fire this callback,
+    /// not textDidChange, and we never implemented it. Adopt the word
+    /// under the cursor exactly like an outside text change.
+    override func selectionDidChange(_ textInput: UITextInput?) {
+        super.selectionDidChange(textInput)
         let proxyWord = currentWord()
         if proxyWord != localWord {
             localWord = proxyWord
@@ -1496,10 +1541,10 @@ class KeyboardViewController: UIInputViewController {
                let followers = bigrams[prev] {
                 out += followers.sorted { $0.value > $1.value }.prefix(3).map { $0.key }
             }
-            if out.count < 3 {
+            if out.count < 6 {
                 for w in learned.sorted { $0.value > $1.value } where !out.contains(w.key) {
                     out.append(w.key)
-                    if out.count == 3 { break }
+                    if out.count == 6 { break }
                 }
             }
             return out
@@ -1524,38 +1569,96 @@ class KeyboardViewController: UIInputViewController {
         }
         for (i, seed) in seedWords.enumerated() where foldedSeeds[i].hasPrefix(fp) {
             offer(seed)
-            if out.count == 3 { return out }
+            if out.count == 6 { return out }
         }
         // v0.6: his pinned personal words outrank merely-learned ones.
         for w in personal.sorted { (learned[$0] ?? 0) > (learned[$1] ?? 0) }
         where fold(w).hasPrefix(fp) {
             offer(w)
-            if out.count == 3 { return out }
+            if out.count == 6 { return out }
         }
         let learnedMatches = learned
             .filter { (learnedFolded[$0.key] ?? fold($0.key)).hasPrefix(fp) }
             .sorted { $0.value > $1.value }
         for m in learnedMatches {
             offer(m.key)
-            if out.count == 3 { return out }
+            if out.count == 6 { return out }
         }
         // v0.9 (Brian): ONE dictionary — the active language's.
         let dictWords = lang == "en" ? WordLists.en : WordLists.es
         let dictFolded = lang == "en" ? foldedEN : foldedES
         for (i, w) in dictWords.enumerated() where dictFolded[i].hasPrefix(fp) {
             offer(w)
-            if out.count == 3 { return out }
+            if out.count == 6 { return out }
+        }
+        // v0.19 (Brian): the TILDE TWIN. The frequency dictionary holds
+        // base forms ("agregar") but not conjugated forms with a tilde
+        // ("agregué"), so finishing "agregue" offered NOTHING — his
+        // screenshots showed empty chips. When he has typed what looks
+        // like a complete word (no longer dictionary word starts with
+        // it) ending in a vowel, offer the same word with a tilde on
+        // that last vowel. Offer only, like everything else.
+        if out.count < 6, lang == "es", prefix.count >= 4,
+           let last = prefix.lowercased().last,
+           "aeiou".contains(last) {
+            let longerExists = dictFolded.contains {
+                $0.count > fp.count && $0.hasPrefix(fp)
+            }
+            if !longerExists {
+                let accents: [Character: Character] = ["a": "á", "e": "é", "i": "í", "o": "ó", "u": "ú"]
+                let lower = prefix.lowercased()
+                var twin: String? = nil
+                if lower.hasSuffix("ia") {
+                    // -grafía / -logía family: the tilde sits on the i
+                    // (ortografia -> ortografía), not on the final a.
+                    twin = String(lower.dropLast(2)) + "ía"
+                } else if lower.hasSuffix("io") {
+                    twin = String(lower.dropLast(2)) + "ío"
+                } else if let a = accents[last] {
+                    twin = String(lower.dropLast()) + String(a)
+                }
+                // v0.19 (Brian): BOTH forms as chips — grabo AND grabó.
+                // Spanish decides by context, which the keyboard cannot
+                // see, so he picks. Direct appends on purpose: offer()
+                // would fold-dedupe the pair into one. Plain form first.
+                if let twin, twin != lower {
+                    if !out.contains(lower), out.count < 6 { out.append(lower) }
+                    if !out.contains(twin), out.count < 6 { out.append(twin) }
+                }
+            }
+        }
+        // v0.19 (Brian: "ponlo de una vez, no lo dejes para la 0.20"):
+        // consult iOS's own spell checker. It knows Spanish orthography
+        // — a missing tilde IS a misspelling to it, so its guesses carry
+        // the correct forms (ortografia -> ortografía, parrafo ->
+        // párrafo) that our frequency list lacks. Guesses fill free
+        // chips as offers, above the raw edit-distance ones below.
+        if out.count < 6, prefix.count >= 3 {
+            if checkerCacheWord != prefix {
+                checkerCacheWord = prefix
+                let ns = prefix as NSString
+                checkerCache = textChecker.guesses(
+                    forWordRange: NSRange(location: 0, length: ns.length),
+                    in: prefix,
+                    language: lang == "en" ? "en" : "es") ?? []
+            }
+            for g in checkerCache {
+                // !out.contains: the twin pair above bypasses offer()'s
+                // folded dedupe, so a guess could duplicate a chip.
+                if g != prefix, !out.contains(g) { offer(g) }
+                if out.count == 6 { break }
+            }
         }
         // v0.12 (Brian): near-word OFFERS. Prefix matching alone could
         // never offer "que" for his "qie" — when the prefix well runs
         // dry, fill the free chips with words one edit away (folded),
         // in dictionary order (= frequency), scanning the top 4000.
         // Offers only: nothing applies without his tap.
-        if out.count < 3, prefix.count >= 3 {
+        if out.count < 6, prefix.count >= 3 {
             for (i, w) in dictWords.enumerated().prefix(4000)
-            where !dictFolded[i].hasPrefix(fp) && editDistanceOne(fp, dictFolded[i]) {
+            where !dictFolded[i].hasPrefix(fp) && editDistanceOne(fp, dictFolded[i]) && !out.contains(w) {
                 offer(w)
-                if out.count == 3 { break }
+                if out.count == 6 { break }
             }
         }
         return out
@@ -1606,9 +1709,11 @@ class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(word)
         learn(word)
         noteCompleted(word)   // v0.6: a tapped chip also completes a word
-        // v0.7 (Brian): NO trailing space after a chip — it left a space
-        // before any punctuation typed next ("palabra ,"). He adds the
-        // space himself when he wants one.
+        // v0.19 (Brian): the trailing space is BACK — he asked for the
+        // old pattern again. The v0.7 objection (a space before the
+        // punctuation typed next) is already handled: insertTextSmart
+        // eats the space before . , ; : ! ? so "palabra!" stays hugged.
+        textDocumentProxy.insertText(" ")
         autoShiftIfNeeded()
         updateSuggestions()
     }
@@ -1721,7 +1826,10 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func wordsNextTapped() {
-        let pages = max(1, (personal.count + 17) / 18)
+        // v0.19: this counted only PINNED words (personal) while the
+        // editor lists pinned + learned — with 5 pinned it capped the
+        // pager at 1 page and the arrow looked dead on a 25-page list.
+        let pages = max(1, (allPersonalWords().count + 17) / 18)
         if wordsPage < pages - 1 { wordsPage += 1 }
         if wordsOpen { buildKeyboard() } else { showWordsPanel() }
     }
@@ -1900,7 +2008,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.18 Speed Lab", "")
+        flashBar("MyKeys v0.19 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -1944,6 +2052,7 @@ class KeyboardViewController: UIInputViewController {
         edSugg = suggEnabled; edSlide = slideOn
         edH = keyRowH; edGap = keyGap; edBorders = bordersOn
         edFont = keyFont; edTheme = themeName; edHaptic = spaceHaptic
+        edChipFont = chipFont
         editorOpen = true
         buildKeyboard()
     }
@@ -2047,6 +2156,20 @@ class KeyboardViewController: UIInputViewController {
         sw4.addArrangedSubview(editorCyclePill("Theme: \(themeLabel(edTheme))", action: #selector(edCycleTheme)))
         sw4.addArrangedSubview(editorCyclePill("Haptic: \(hapticLabel(edHaptic))", action: #selector(edCycleHaptic)))
 
+        // v0.19 (Brian): the suggestion chips get their OWN size setting.
+        let sC = editorRow(44)
+        let lC = editorLabel("Chip size")
+        lC.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        sC.addArrangedSubview(lC)
+        let sliderC = UISlider()
+        sliderC.minimumValue = 13; sliderC.maximumValue = 24
+        sliderC.value = Float(edChipFont)
+        sliderC.addTarget(self, action: #selector(edChipFontChanged(_:)), for: .valueChanged)
+        sC.addArrangedSubview(sliderC)
+        editorChipFontLabel = editorLabel("\(Int(edChipFont))")
+        editorChipFontLabel!.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        sC.addArrangedSubview(editorChipFontLabel!)
+
         let sw3 = editorRow(40)
         sw3.distribution = .fillEqually
         sw3.addArrangedSubview(editorPill("Borders", on: edBorders, action: #selector(edToggleBorders)))
@@ -2081,7 +2204,7 @@ class KeyboardViewController: UIInputViewController {
         done.addTarget(self, action: #selector(editorDoneTapped), for: .touchUpInside)
         bottom.addArrangedSubview(done)
 
-        heightConstraint.constant = kbBaseHeight + 230
+        heightConstraint.constant = kbBaseHeight + 274
     }
 
     private func themeLabel(_ t: String) -> String {
@@ -2124,6 +2247,11 @@ class KeyboardViewController: UIInputViewController {
         edFont = CGFloat(Int(sender.value.rounded()))
         editorFontLabel?.text = "\(Int(edFont))"
         refillEditorPreview()
+    }
+
+    @objc private func edChipFontChanged(_ sender: UISlider) {
+        edChipFont = CGFloat(Int(sender.value.rounded()))
+        editorChipFontLabel?.text = "\(Int(edChipFont))"
     }
 
     private func refillEditorPreview() {
@@ -2184,6 +2312,8 @@ class KeyboardViewController: UIInputViewController {
         suggEnabled = edSugg; slideOn = edSlide
         keyRowH = edH; keyGap = edGap; bordersOn = edBorders
         keyFont = edFont; themeName = edTheme; spaceHaptic = edHaptic
+        chipFont = edChipFont
+        for c in chips { c.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium) }
         // Saved in BOTH of the keyboard's own stores, like the language
         // flip: the keyboard always reads its own last word (v0.11).
         for (key, val) in [(prudentKey, edPrudent), (popupKey, edPopup),
@@ -2202,6 +2332,8 @@ class KeyboardViewController: UIInputViewController {
         UserDefaults.standard.set(edTheme, forKey: themeKey)
         wordStore.set(edHaptic, forKey: hapticKey)
         UserDefaults.standard.set(edHaptic, forKey: hapticKey)
+        wordStore.set(Int(edChipFont), forKey: chipFontKey)
+        UserDefaults.standard.set(Int(edChipFont), forKey: chipFontKey)
         applyAppAppearance()   // v0.18: a new theme takes effect at once
         applyTrayColor()
         if !popupEnabled { hidePopup() }
@@ -2677,6 +2809,12 @@ class KeyboardViewController: UIInputViewController {
         localWord = ""
         lastCompletedWord = nil   // v0.6: a new line starts a new phrase
         textDocumentProxy.insertText("\n")
+        // v0.19 (Brian): a new paragraph starts capitalised — set the
+        // shift HERE instead of trusting textDidChange to do it later.
+        if mode == .letters, shift == .off {
+            shift = .once
+            applyShiftVisuals()
+        }
         updateSuggestions()
     }
 
