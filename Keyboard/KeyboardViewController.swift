@@ -455,6 +455,14 @@ class KeyboardViewController: UIInputViewController {
     /// app declares nothing (.default), follow the phone as before.
     /// Changing the override fires traitCollectionDidChange, which
     /// already rebuilds with fresh colours.
+    /// v0.20 HYPOTHESIS (Brian verifies): the style applyAppAppearance
+    /// decided on, kept so solidImage can bake the key colours with
+    /// THIS style explicitly. The ambient traitCollection still lags
+    /// one beat behind the override when viewWillAppear rebuilds —
+    /// v0.19's miss: dynamic chips rendered light while the baked
+    /// keys stayed dark, in the same screenshot.
+    private var effectiveStyle: UIUserInterfaceStyle = .unspecified
+
     private func applyAppAppearance() {
         let want: UIUserInterfaceStyle
         // v0.18: a theme Brian picked himself beats the app's request.
@@ -468,6 +476,7 @@ class KeyboardViewController: UIInputViewController {
             default: want = .unspecified
             }
         }
+        effectiveStyle = want
         if overrideUserInterfaceStyle != want {
             overrideUserInterfaceStyle = want
         }
@@ -716,7 +725,14 @@ class KeyboardViewController: UIInputViewController {
         // when the host app asks the keyboard for the other appearance,
         // the frozen image kept the wrong mode's colour while the labels
         // followed the view — Brian's "se invierte el color" (2026-11-12).
-        let resolved = color.resolvedColor(with: traitCollection)
+        // v0.20: resolve against the EFFECTIVE style when one is set,
+        // so a bake that happens before the override lands on the
+        // trait collection still freezes the intended colour.
+        let traits = effectiveStyle == .unspecified
+            ? traitCollection
+            : UITraitCollection(traitsFrom: [traitCollection,
+                UITraitCollection(userInterfaceStyle: effectiveStyle)])
+        let resolved = color.resolvedColor(with: traits)
         return UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { ctx in
             resolved.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
@@ -1661,6 +1677,23 @@ class KeyboardViewController: UIInputViewController {
                 if out.count == 6 { break }
             }
         }
+        // v0.20 (Brian): word -> emoji offer. A small bilingual map,
+        // consulted in BOTH languages regardless of the 🌐 switch —
+        // keyboard in Spanish, "thanks", "thank you" and "gracias"
+        // all offer 🙏. Free chip only, never displaces a word. The
+        // two-word pair (previous word + this one) is tried first.
+        if out.count < 6 {
+            var hit: String? = nil
+            if let ctx = textDocumentProxy.documentContextBeforeInput,
+               ctx.count > prefix.count {
+                let before = String(ctx.dropLast(prefix.count))
+                if let prev = before.split(separator: " ").last {
+                    hit = EmojiData.wordEmoji[fold(String(prev)) + " " + fp]
+                }
+            }
+            if hit == nil { hit = EmojiData.wordEmoji[fp] }
+            if let e = hit, !out.contains(e) { out.append(e) }
+        }
         return out
     }
 
@@ -1707,8 +1740,15 @@ class KeyboardViewController: UIInputViewController {
             if shift == .once { shift = .off; applyShiftVisuals() }
         }
         textDocumentProxy.insertText(word)
-        learn(word)
-        noteCompleted(word)   // v0.6: a tapped chip also completes a word
+        if EmojiData.wordEmojiValues.contains(word) {
+            // v0.20: an emoji offer is not a word — never learn it or
+            // feed it to the bigrams; count it as emoji use instead,
+            // so it can climb into ⭐ Top like any tapped emoji.
+            recordEmojiUse(word)
+        } else {
+            learn(word)
+            noteCompleted(word)   // v0.6: a tapped chip also completes a word
+        }
         // v0.19 (Brian): the trailing space is BACK — he asked for the
         // old pattern again. The v0.7 objection (a space before the
         // punctuation typed next) is already handled: insertTextSmart
@@ -2008,7 +2048,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.19 Speed Lab", "")
+        flashBar("MyKeys v0.20 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
