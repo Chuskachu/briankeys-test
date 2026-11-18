@@ -228,6 +228,7 @@ class KeyboardViewController: UIInputViewController {
     private var edPrudent = false, edPopup = true, edSugg = true, edSlide = true
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
     private var edFont: CGFloat = 22, edTheme = "auto", edHaptic = 2
+    private var edLang = "es"   // v0.21: es | en | bi
     private var edChipFont: CGFloat = 17
     /// v0.12 (Brian): the big words editor — a full page like the
     /// visual editor, for his OWN words only (the old 5-per-page panel
@@ -1557,10 +1558,10 @@ class KeyboardViewController: UIInputViewController {
                let followers = bigrams[prev] {
                 out += followers.sorted { $0.value > $1.value }.prefix(3).map { $0.key }
             }
-            if out.count < 6 {
+            if out.count < 5 {
                 for w in learned.sorted { $0.value > $1.value } where !out.contains(w.key) {
                     out.append(w.key)
-                    if out.count == 6 { break }
+                    if out.count == 5 { break }
                 }
             }
             return out
@@ -1585,27 +1586,45 @@ class KeyboardViewController: UIInputViewController {
         }
         for (i, seed) in seedWords.enumerated() where foldedSeeds[i].hasPrefix(fp) {
             offer(seed)
-            if out.count == 6 { return out }
+            if out.count == 5 { return out }
         }
         // v0.6: his pinned personal words outrank merely-learned ones.
         for w in personal.sorted { (learned[$0] ?? 0) > (learned[$1] ?? 0) }
         where fold(w).hasPrefix(fp) {
             offer(w)
-            if out.count == 6 { return out }
+            if out.count == 5 { return out }
         }
         let learnedMatches = learned
             .filter { (learnedFolded[$0.key] ?? fold($0.key)).hasPrefix(fp) }
             .sorted { $0.value > $1.value }
         for m in learnedMatches {
             offer(m.key)
-            if out.count == 6 { return out }
+            if out.count == 5 { return out }
         }
         // v0.9 (Brian): ONE dictionary — the active language's.
+        // v0.21 (Brian): bilingual mode searches BOTH dictionaries,
+        // interleaved by frequency rank (es, en, es, en...), because
+        // he mixes the two in the same messages. dictWords/dictFolded
+        // stay the PRIMARY list (ES unless English-only) for the
+        // twin and near-word passes below. Word chips cap at FIVE
+        // now — the sixth chip belongs to emojis (see emojiSlot()).
         let dictWords = lang == "en" ? WordLists.en : WordLists.es
         let dictFolded = lang == "en" ? foldedEN : foldedES
-        for (i, w) in dictWords.enumerated() where dictFolded[i].hasPrefix(fp) {
-            offer(w)
-            if out.count == 6 { return out }
+        if lang == "bi" {
+            let esM = WordLists.es.enumerated().filter { foldedES[$0.offset].hasPrefix(fp) }
+            let enM = WordLists.en.enumerated().filter { foldedEN[$0.offset].hasPrefix(fp) }
+            var ei = 0, ni = 0
+            while out.count < 5, ei < esM.count || ni < enM.count {
+                if ei < esM.count { offer(esM[ei].element); ei += 1 }
+                if out.count >= 5 { break }
+                if ni < enM.count { offer(enM[ni].element); ni += 1 }
+            }
+            if out.count == 5 { return out }
+        } else {
+            for (i, w) in dictWords.enumerated() where dictFolded[i].hasPrefix(fp) {
+                offer(w)
+                if out.count == 5 { return out }
+            }
         }
         // v0.19 (Brian): the TILDE TWIN. The frequency dictionary holds
         // base forms ("agregar") but not conjugated forms with a tilde
@@ -1614,7 +1633,7 @@ class KeyboardViewController: UIInputViewController {
         // like a complete word (no longer dictionary word starts with
         // it) ending in a vowel, offer the same word with a tilde on
         // that last vowel. Offer only, like everything else.
-        if out.count < 6, lang == "es", prefix.count >= 4,
+        if out.count < 5, lang != "en", prefix.count >= 4,
            let last = prefix.lowercased().last,
            "aeiou".contains(last) {
             let longerExists = dictFolded.contains {
@@ -1638,8 +1657,8 @@ class KeyboardViewController: UIInputViewController {
                 // see, so he picks. Direct appends on purpose: offer()
                 // would fold-dedupe the pair into one. Plain form first.
                 if let twin, twin != lower {
-                    if !out.contains(lower), out.count < 6 { out.append(lower) }
-                    if !out.contains(twin), out.count < 6 { out.append(twin) }
+                    if !out.contains(lower), out.count < 5 { out.append(lower) }
+                    if !out.contains(twin), out.count < 5 { out.append(twin) }
                 }
             }
         }
@@ -1649,7 +1668,7 @@ class KeyboardViewController: UIInputViewController {
         // the correct forms (ortografia -> ortografía, parrafo ->
         // párrafo) that our frequency list lacks. Guesses fill free
         // chips as offers, above the raw edit-distance ones below.
-        if out.count < 6, prefix.count >= 3 {
+        if out.count < 5, prefix.count >= 3 {
             if checkerCacheWord != prefix {
                 checkerCacheWord = prefix
                 let ns = prefix as NSString
@@ -1662,7 +1681,7 @@ class KeyboardViewController: UIInputViewController {
                 // !out.contains: the twin pair above bypasses offer()'s
                 // folded dedupe, so a guess could duplicate a chip.
                 if g != prefix, !out.contains(g) { offer(g) }
-                if out.count == 6 { break }
+                if out.count == 5 { break }
             }
         }
         // v0.12 (Brian): near-word OFFERS. Prefix matching alone could
@@ -1670,31 +1689,45 @@ class KeyboardViewController: UIInputViewController {
         // dry, fill the free chips with words one edit away (folded),
         // in dictionary order (= frequency), scanning the top 4000.
         // Offers only: nothing applies without his tap.
-        if out.count < 6, prefix.count >= 3 {
+        if out.count < 5, prefix.count >= 3 {
             for (i, w) in dictWords.enumerated().prefix(4000)
             where !dictFolded[i].hasPrefix(fp) && editDistanceOne(fp, dictFolded[i]) && !out.contains(w) {
                 offer(w)
-                if out.count == 6 { break }
+                if out.count == 5 { break }
             }
         }
-        // v0.20 (Brian): word -> emoji offer. A small bilingual map,
-        // consulted in BOTH languages regardless of the 🌐 switch —
-        // keyboard in Spanish, "thanks", "thank you" and "gracias"
-        // all offer 🙏. Free chip only, never displaces a word. The
-        // two-word pair (previous word + this one) is tried first.
-        if out.count < 6 {
-            var hit: String? = nil
+        if out.count < 5, lang == "bi", prefix.count >= 3 {
+            for (i, w) in WordLists.en.enumerated().prefix(4000)
+            where !foldedEN[i].hasPrefix(fp) && editDistanceOne(fp, foldedEN[i]) && !out.contains(w) {
+                offer(w)
+                if out.count == 5 { break }
+            }
+        }
+        // v0.21: the word -> emoji offer no longer lives here — it
+        // moved to emojiSlot(), the dedicated sixth chip.
+        return Array(out.prefix(5))
+    }
+
+    /// v0.21 (Brian): the SIXTH chip (bottom-right) belongs to
+    /// emojis alone — the word->emoji match for what he is typing
+    /// (two-word pair first, then the single word; the bilingual
+    /// map, consulted in both languages as always), or, when
+    /// nothing matches, his most-used emoji.
+    private func emojiSlot() -> String {
+        let prefix = localWord
+        if !prefix.isEmpty {
+            let fp = fold(prefix)
             if let ctx = textDocumentProxy.documentContextBeforeInput,
                ctx.count > prefix.count {
                 let before = String(ctx.dropLast(prefix.count))
-                if let prev = before.split(separator: " ").last {
-                    hit = EmojiData.wordEmoji[fold(String(prev)) + " " + fp]
+                if let prev = before.split(separator: " ").last,
+                   let hit = EmojiData.wordEmoji[fold(String(prev)) + " " + fp] {
+                    return hit
                 }
             }
-            if hit == nil { hit = EmojiData.wordEmoji[fp] }
-            if let e = hit, !out.contains(e) { out.append(e) }
+            if let hit = EmojiData.wordEmoji[fp] { return hit }
         }
-        return out
+        return topEmojis().first ?? "😀"
     }
 
     /// v0.9 (Brian): a chip shows the word AS IT WILL BE INSERTED —
@@ -1727,10 +1760,25 @@ class KeyboardViewController: UIInputViewController {
                 chip.alpha = 0.35
             }
         }
+        // v0.21: chip 6 (bottom-right) is the emoji slot, always live.
+        let slot = chips[5]
+        slot.setTitle(emojiSlot(), for: .normal)
+        slot.isEnabled = true
+        slot.alpha = 1
     }
 
     @objc private func chipTapped(_ sender: UIButton) {
         let i = sender.tag
+        // v0.21: chip 6 is the emoji slot — it inserts AT the cursor
+        // without eating the word he is typing, adds no space, and
+        // never learns; it only counts as emoji use.
+        if i == 5 {
+            let e = emojiSlot()
+            textDocumentProxy.insertText(e)
+            recordEmojiUse(e)
+            updateSuggestions()
+            return
+        }
         guard i < currentSuggestions.count else { return }
         var word = currentSuggestions[i]
         for _ in localWord { textDocumentProxy.deleteBackward() }
@@ -2030,7 +2078,7 @@ class KeyboardViewController: UIInputViewController {
         variantStrip.addArrangedSubview(stripButton("📋 Copy (\(logCount))", #selector(logCopyTapped)))
         variantStrip.addArrangedSubview(stripButton("🗑 Erase", #selector(logClearTapped)))
         variantStrip.addArrangedSubview(stripButton(
-            lang == "en" ? "🌐 EN" : "🌐 ES", #selector(langToggleTapped)))
+            lang == "en" ? "🌐 EN" : lang == "bi" ? "🌐 ES+EN" : "🌐 ES", #selector(langToggleTapped)))
         variantStrip.addArrangedSubview(stripButton("🎨 Editor", #selector(editorTapped)))
         let close = UIButton(type: .system)
         close.setTitle("✕", for: .normal)
@@ -2048,7 +2096,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.20 Speed Lab", "")
+        flashBar("MyKeys v0.21 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2076,10 +2124,12 @@ class KeyboardViewController: UIInputViewController {
 
     /// v0.9 (Brian): the panel's one surviving switch — the language.
     @objc private func langToggleTapped() {
-        lang = (lang == "es") ? "en" : "es"
+        // v0.21 (Brian): THREE modes — ES, EN, and ES+EN bilingual,
+        // because he mixes both constantly in the same messages.
+        lang = lang == "es" ? "en" : lang == "en" ? "bi" : "es"
         wordStore.set(lang, forKey: langKey)
         UserDefaults.standard.set(lang, forKey: langKey)
-        if logEnabled { logEvent(k: "CFG", m: lang == "en" ? "lang-en" : "lang-es", viewPoint: .zero, frame: nil) }
+        if logEnabled { logEvent(k: "CFG", m: "lang-" + lang, viewPoint: .zero, frame: nil) }
         updateSuggestions()
         showLogPanel()   // rebuild so the label shows the new language
     }
@@ -2093,6 +2143,7 @@ class KeyboardViewController: UIInputViewController {
         edH = keyRowH; edGap = keyGap; edBorders = bordersOn
         edFont = keyFont; edTheme = themeName; edHaptic = spaceHaptic
         edChipFont = chipFont
+        edLang = lang
         editorOpen = true
         buildKeyboard()
     }
@@ -2196,6 +2247,11 @@ class KeyboardViewController: UIInputViewController {
         sw4.addArrangedSubview(editorCyclePill("Theme: \(themeLabel(edTheme))", action: #selector(edCycleTheme)))
         sw4.addArrangedSubview(editorCyclePill("Haptic: \(hapticLabel(edHaptic))", action: #selector(edCycleHaptic)))
 
+        // v0.21 (Brian): language mode — ES, EN, or bilingual.
+        let swLang = editorRow(40)
+        swLang.distribution = .fillEqually
+        swLang.addArrangedSubview(editorCyclePill("Language: \(langLabel(edLang))", action: #selector(edCycleLang)))
+
         // v0.19 (Brian): the suggestion chips get their OWN size setting.
         let sC = editorRow(44)
         let lC = editorLabel("Chip size")
@@ -2244,7 +2300,7 @@ class KeyboardViewController: UIInputViewController {
         done.addTarget(self, action: #selector(editorDoneTapped), for: .touchUpInside)
         bottom.addArrangedSubview(done)
 
-        heightConstraint.constant = kbBaseHeight + 274
+        heightConstraint.constant = kbBaseHeight + 314
     }
 
     private func themeLabel(_ t: String) -> String {
@@ -2275,6 +2331,15 @@ class KeyboardViewController: UIInputViewController {
         edTheme = edTheme == "auto" ? "light"
             : edTheme == "light" ? "dark"
             : edTheme == "dark" ? "contrast" : "auto"
+        buildKeyboard()
+    }
+
+    private func langLabel(_ l: String) -> String {
+        l == "en" ? "EN" : l == "bi" ? "ES+EN" : "ES"
+    }
+
+    @objc private func edCycleLang() {
+        edLang = edLang == "es" ? "en" : edLang == "en" ? "bi" : "es"
         buildKeyboard()
     }
 
@@ -2353,6 +2418,9 @@ class KeyboardViewController: UIInputViewController {
         keyRowH = edH; keyGap = edGap; bordersOn = edBorders
         keyFont = edFont; themeName = edTheme; spaceHaptic = edHaptic
         chipFont = edChipFont
+        lang = edLang
+        wordStore.set(edLang, forKey: langKey)
+        UserDefaults.standard.set(edLang, forKey: langKey)
         for c in chips { c.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium) }
         // Saved in BOTH of the keyboard's own stores, like the language
         // flip: the keyboard always reads its own last word (v0.11).
