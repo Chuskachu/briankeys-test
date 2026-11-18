@@ -437,6 +437,7 @@ class KeyboardViewController: UIInputViewController {
         // old look. Rebuilding once per open keeps pages consistent;
         // the cache still serves switches within the session.
         pageCache.removeAll()
+        suppressNextCacheSave = true   // v0.22: detachAll would re-save it
         // v0.19: the LETTERS page is baked once in viewDidLoad — before
         // applyAppAppearance ever reads the app's declared look — and no
         // path repainted it afterwards, so it kept the phone's style
@@ -591,6 +592,13 @@ class KeyboardViewController: UIInputViewController {
         var height: CGFloat
     }
     private var pageCache: [Mode: CachedPage] = [:]
+    // v0.22: when a rebuild is meant to DROP the cached pages
+    // (appearance flip, editor applied), detachAll must not save
+    // the visible page straight back into the cache — that silent
+    // re-save is why the letters page kept its viewDidLoad colours
+    // through v0.19's repaint and v0.20's effectiveStyle bake:
+    // the repaint never happened, the dark page was reattached.
+    private var suppressNextCacheSave = false
     private var shownModePage: Mode? = nil
     private var emojiStale = false
 
@@ -601,7 +609,7 @@ class KeyboardViewController: UIInputViewController {
         guard !arranged.isEmpty else { return }
         var prefix = (arranged.first === suggestionBar) ? 1 : 0
         prefix += 2   // the variant strip and the panel strip follow
-        if arranged.count > prefix, let m = shownModePage {
+        if arranged.count > prefix, let m = shownModePage, !suppressNextCacheSave {
             let content = Array(arranged[prefix...])
             pageCache[m] = CachedPage(views: content,
                                       slideKeys: slideKeys,
@@ -618,6 +626,7 @@ class KeyboardViewController: UIInputViewController {
             v.removeFromSuperview()
         }
         shownModePage = nil
+        suppressNextCacheSave = false   // v0.22: one-shot
     }
 
     private func buildKeyboardNow() {
@@ -747,6 +756,7 @@ class KeyboardViewController: UIInputViewController {
         if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle,
            mainStack != nil {
             pageCache.removeAll()   // v0.15: cached pages hold old colours
+            suppressNextCacheSave = true   // v0.22: don't re-save the stale page
             buildKeyboard()
         }
     }
@@ -2096,7 +2106,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.21 Speed Lab", "")
+        flashBar("MyKeys v0.22 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2448,6 +2458,7 @@ class KeyboardViewController: UIInputViewController {
         if logEnabled { logEvent(k: "CFG", m: "editor-done", viewPoint: .zero, frame: nil) }
         editorOpen = false
         pageCache.removeAll()   // v0.15: geometry/settings changed
+        suppressNextCacheSave = true   // v0.22: don't re-save the stale page
         buildKeyboard()
         hideVariants()
         flashBar("Editor applied \u{2713}", "")
