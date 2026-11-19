@@ -2154,7 +2154,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.23 Speed Lab", "")
+        flashBar("MyKeys v0.24 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2927,7 +2927,22 @@ class KeyboardViewController: UIInputViewController {
         guard variantStrip == nil || variantStrip.isHidden else { return }
         guard crossings >= 1, path.count >= 2 else { return }
         let cands = glideCandidates(path: path)
-        guard let best = cands.first else { return }
+        // v0.24: every real trace goes to the touch log with its
+        // outcome, so a bad glide is data, not a mystery.
+        if logEnabled {
+            logEvent(k: "GLIDE", m: "\(String(path))>\(cands.first ?? "∅")",
+                     viewPoint: .zero, frame: nil)
+        }
+        guard let best = cands.first else {
+            // v0.24 fallback: no guess — type the letters he traced
+            // (what Letters mode would have written) instead of
+            // leaving him with the single touch-down letter.
+            if path.count > base {
+                for ch in path[base...] { insertTextSmart(String(ch)) }
+                updateSuggestions()
+            }
+            return
+        }
         for _ in 0..<base { textDocumentProxy.deleteBackward() }
         localWord = ""
         var word = best
@@ -2952,12 +2967,17 @@ class KeyboardViewController: UIInputViewController {
     private func glideCandidates(path: [Character]) -> [String] {
         let p = String(path)
         guard p.count >= 2, let first = p.first else { return [] }
+        // v0.24: a trace often starts one key off — the word may begin
+        // on the path's second key (small penalty, exact start wins).
+        let second: Character? = p.count >= 3 ? p[p.index(after: p.startIndex)] : nil
         var best: [String: (word: String, score: Int)] = [:]
         func consider(_ surface: String, bonus: Int) {
             let skel = dedupeFolded(surface)
-            guard skel.count >= 2, skel.first == first else { return }
+            guard skel.count >= 2 else { return }
+            guard skel.first == first || skel.first == second else { return }
             guard isSubsequence(skel, of: p) else { return }
             var s = bonus
+            if skel.first != first { s -= 15 }
             if skel == p { s += 120 }
             if skel.last == p.last { s += 40 }
             s += Int(20.0 * Double(skel.count) / Double(p.count))
