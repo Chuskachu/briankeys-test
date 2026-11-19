@@ -1708,7 +1708,7 @@ class KeyboardViewController: UIInputViewController {
         func freqScore(_ rank: Int, _ total: Int) -> Double {
             40.0 * (1.0 - Double(rank) / Double(max(1, total)))
         }
-        let prevFollowers = lastCompletedWord?.lowercased().flatMap { bigrams[$0] }
+        let prevFollowers = lastCompletedWord.flatMap { bigrams[$0.lowercased()] }
         func contextBonus(_ surface: String) -> Double {
             guard let fol = prevFollowers,
                   let c = fol[surface] ?? fol[surface.lowercased()] else { return 0 }
@@ -3073,8 +3073,7 @@ class KeyboardViewController: UIInputViewController {
         // v0.26 audit fix: the previous word's bigram followers get a
         // context bonus — after "voy a", infinitives should beat
         // spatial rivals (AOSP rescoring, cheap version).
-        let prevFollowers: [String: Int]? = lastCompletedWord?.lowercased()
-            .flatMap { bigrams[$0] }
+        let prevFollowers: [String: Int]? = lastCompletedWord.flatMap { bigrams[$0.lowercased()] }
         var best: [String: (word: String, score: Int)] = [:]
         func consider(_ surface: String, skel: String, foldedForm: String, bonus: Int) {
             guard skel.count >= 2 else { return }
