@@ -56,6 +56,8 @@ private class KeyButton: UIButton {
     static var frameCache: [ObjectIdentifier: CGRect] = [:]
     var slideEnabled = false
     var onSlideCommit: ((KeyButton, CGPoint) -> Void)?
+    /// v0.23: glide typing needs the lift moment (the guess lands then).
+    var onSlideEnd: (() -> Void)?
     private var slidCommitted: Set<ObjectIdentifier> = []
 
     // v0.5 (Brian): flick DOWN on the space bar = Enter (the Return key
@@ -107,6 +109,16 @@ private class KeyButton: UIButton {
             }
         }
     }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        onSlideEnd?()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        onSlideEnd?()
+    }
 }
 
 class KeyboardViewController: UIInputViewController {
@@ -152,6 +164,15 @@ class KeyboardViewController: UIInputViewController {
     /// full log only 3 in ~2,000 taps, so the test is cheap and clean.
     private let slidePrefKey = "bk_slide_on_v1"
     private lazy var slideOn: Bool = settingBool(slidePrefKey, default: true)
+    /// v0.23: slide mode — 0 = off, 1 = letters (the classic drag-typing),
+    /// 2 = words (glide typing: trace the path, the guess lands on lift).
+    private let slideModeKey = "bk_slide_mode_v1"
+    private var slideMode: Int = 1
+    private var glidePath: [Character] = []
+    private var glideCrossings = 0
+    private var glideBaseCount = 0
+    private var glideChips: [String]? = nil
+    private var glideInserted: String? = nil
     /// v0.8 (Brian): his words lived in ONE drawer shared between the
     /// app and the keyboard (App Groups). v0.16 (Brian): that drawer
     /// never existed under SideStore — the unsigned build drops the
@@ -176,6 +197,9 @@ class KeyboardViewController: UIInputViewController {
         popupEnabled = settingBool(popupKey, default: true)
         suggEnabled = settingBool(suggKey, default: true)
         slideOn = settingBool(slidePrefKey, default: true)
+        let storedMode = settingInt(slideModeKey, default: -1)
+        slideMode = storedMode >= 0 ? min(2, max(0, storedMode)) : (slideOn ? 2 : 0)
+        slideOn = slideMode != 0
         keyRowH = CGFloat(min(66, max(46, settingInt(keyHKey, default: 56))))
         keyGap = CGFloat(min(6, max(0, settingInt(keyGapKey, default: 0))))
         bordersOn = settingBool(bordersKey, default: true)
@@ -225,7 +249,8 @@ class KeyboardViewController: UIInputViewController {
     private var chipFont: CGFloat = 17       // v0.19: suggestion-chip text size
     private var editorOpen = false
     // Staged editor values: nothing persists until he taps Listo.
-    private var edPrudent = false, edPopup = true, edSugg = true, edSlide = true
+    private var edPrudent = false, edPopup = true, edSugg = true
+    private var edSlideMode = 2
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
     private var edFont: CGFloat = 22, edTheme = "auto", edHaptic = 2
     private var edLang = "es"   // v0.21: es | en | bi
@@ -802,6 +827,7 @@ class KeyboardViewController: UIInputViewController {
         // This key can also be typed by dragging into it (V1.6).
         b.slideEnabled = true
         b.onSlideCommit = { [weak self] target, pt in self?.slideCommit(target, windowPoint: pt, via: "slide") }
+        b.onSlideEnd = { [weak self] in self?.slideEnded() }
         slideKeys.append(b)
         if !variants.isEmpty { addLongPress(to: b) }
         return b
@@ -1758,7 +1784,11 @@ class KeyboardViewController: UIInputViewController {
             }
             return
         }
-        currentSuggestions = computeSuggestions(for: localWord)
+        if let g = glideChips, glideInserted != nil {
+            currentSuggestions = Array(g.prefix(5))
+        } else {
+            currentSuggestions = computeSuggestions(for: localWord)
+        }
         for (i, chip) in chips.enumerated() {
             if i < currentSuggestions.count {
                 chip.setTitle(displayForm(currentSuggestions[i]), for: .normal)
@@ -1786,6 +1816,24 @@ class KeyboardViewController: UIInputViewController {
             let e = emojiSlot()
             textDocumentProxy.insertText(e)
             recordEmojiUse(e)
+            updateSuggestions()
+            return
+        }
+        // v0.23: a chip tap right after a glide replaces the guessed
+        // word (and its trailing space) with the chosen candidate.
+        if let inserted = glideInserted, let g = glideChips, i < g.count {
+            for _ in 0..<(inserted.count + 1) { textDocumentProxy.deleteBackward() }
+            var word = g[i]
+            if shift != .off {
+                word = word.prefix(1).uppercased() + word.dropFirst()
+                if shift == .once { shift = .off; applyShiftVisuals() }
+            }
+            textDocumentProxy.insertText(word)
+            learn(word)
+            noteCompleted(word)
+            textDocumentProxy.insertText(" ")
+            glideInserted = word
+            autoShiftIfNeeded()
             updateSuggestions()
             return
         }
@@ -2106,7 +2154,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.22 Speed Lab", "")
+        flashBar("MyKeys v0.23 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2149,7 +2197,7 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func editorTapped() {
         edPrudent = prudentEnabled; edPopup = popupEnabled
-        edSugg = suggEnabled; edSlide = slideOn
+        edSugg = suggEnabled; edSlideMode = slideMode
         edH = keyRowH; edGap = keyGap; edBorders = bordersOn
         edFont = keyFont; edTheme = themeName; edHaptic = spaceHaptic
         edChipFont = chipFont
@@ -2210,7 +2258,7 @@ class KeyboardViewController: UIInputViewController {
         let sw2 = editorRow(40)
         sw2.distribution = .fillEqually
         sw2.addArrangedSubview(editorPill("Suggestions", on: edSugg, action: #selector(edToggleSugg)))
-        sw2.addArrangedSubview(editorPill("Slide", on: edSlide, action: #selector(edToggleSlide)))
+        sw2.addArrangedSubview(editorCyclePill("Slide: \(slideModeLabel(edSlideMode))", action: #selector(edCycleSlide)))
 
         let sH = editorRow(44)
         let lH = editorLabel("Key size")
@@ -2394,7 +2442,11 @@ class KeyboardViewController: UIInputViewController {
     @objc private func edTogglePrudent() { edPrudent.toggle(); buildKeyboard() }
     @objc private func edTogglePopup() { edPopup.toggle(); buildKeyboard() }
     @objc private func edToggleSugg() { edSugg.toggle(); buildKeyboard() }
-    @objc private func edToggleSlide() { edSlide.toggle(); buildKeyboard() }
+    @objc private func edCycleSlide() { edSlideMode = (edSlideMode + 1) % 3; buildKeyboard() }
+
+    private func slideModeLabel(_ m: Int) -> String {
+        m == 2 ? "Words" : m == 1 ? "Letters" : "Off"
+    }
     @objc private func edToggleBorders() { edBorders.toggle(); buildKeyboard() }
 
     @objc private func edHeightChanged(_ sender: UISlider) {
@@ -2424,7 +2476,7 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func editorDoneTapped() {
         prudentEnabled = edPrudent; popupEnabled = edPopup
-        suggEnabled = edSugg; slideOn = edSlide
+        suggEnabled = edSugg; slideMode = edSlideMode; slideOn = edSlideMode != 0
         keyRowH = edH; keyGap = edGap; bordersOn = edBorders
         keyFont = edFont; themeName = edTheme; spaceHaptic = edHaptic
         chipFont = edChipFont
@@ -2432,10 +2484,14 @@ class KeyboardViewController: UIInputViewController {
         wordStore.set(edLang, forKey: langKey)
         UserDefaults.standard.set(edLang, forKey: langKey)
         for c in chips { c.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium) }
+        wordStore.set(edSlideMode, forKey: slideModeKey)
+        UserDefaults.standard.set(edSlideMode, forKey: slideModeKey)
+        wordStore.set(edSlideMode != 0, forKey: slidePrefKey)
+        UserDefaults.standard.set(edSlideMode != 0, forKey: slidePrefKey)
         // Saved in BOTH of the keyboard's own stores, like the language
         // flip: the keyboard always reads its own last word (v0.11).
         for (key, val) in [(prudentKey, edPrudent), (popupKey, edPopup),
-                           (suggKey, edSugg), (slidePrefKey, edSlide),
+                           (suggKey, edSugg),
                            (bordersKey, edBorders)] {
             wordStore.set(val, forKey: key)
             UserDefaults.standard.set(val, forKey: key)
@@ -2816,6 +2872,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func letterTouchedDown(_ sender: KeyButton) {
+        glideChips = nil; glideInserted = nil
         guard let label = sender.accessibilityLabel ?? sender.title(for: .normal) else { return }
         insertTextSmart(label)
         pendingVariantKey = sender   // a long-press variant may replace this char
@@ -2828,6 +2885,21 @@ class KeyboardViewController: UIInputViewController {
     private func slideCommit(_ target: KeyButton, windowPoint: CGPoint, via: String) {
         guard slideOn else { return }   // v0.6: Brian's A/B switch (panel)
         guard variantStrip == nil || variantStrip.isHidden else { return }
+        // v0.23 glide typing: in Words mode a drag does NOT type — it
+        // traces the word's path; the guess lands when the finger lifts.
+        if slideMode == 2, via == "slide", !target.isSpaceKey,
+           let raw = target.accessibilityLabel ?? target.title(for: .normal),
+           let ch = fold(raw).first, ch.isLetter {
+            if glidePath.isEmpty {
+                glidePath = Array(fold(localWord))
+                glideBaseCount = localWord.count
+                glideCrossings = 0
+            }
+            if glidePath.last != ch { glidePath.append(ch) }
+            glideCrossings += 1
+            keyTouchedDown(target)
+            return
+        }
         if logEnabled {
             logEvent(k: keyLabel(target), m: via,
                      viewPoint: view.convert(windowPoint, from: nil),
@@ -2842,6 +2914,84 @@ class KeyboardViewController: UIInputViewController {
             pendingBaseChar = localWord.last.map { String($0) }
             showPopup(for: target)
         }
+    }
+
+    /// v0.23: the finger lifted. In Words mode, if the drag really
+    /// crossed keys, turn the traced path into a word.
+    private func slideEnded() {
+        let path = glidePath
+        let crossings = glideCrossings
+        let base = glideBaseCount
+        glidePath = []; glideCrossings = 0; glideBaseCount = 0
+        guard slideMode == 2 else { return }
+        guard variantStrip == nil || variantStrip.isHidden else { return }
+        guard crossings >= 1, path.count >= 2 else { return }
+        let cands = glideCandidates(path: path)
+        guard let best = cands.first else { return }
+        for _ in 0..<base { textDocumentProxy.deleteBackward() }
+        localWord = ""
+        var word = best
+        if shift != .off {
+            word = word.prefix(1).uppercased() + word.dropFirst()
+            if shift == .once { shift = .off; applyShiftVisuals() }
+        }
+        textDocumentProxy.insertText(word)
+        learn(word)
+        noteCompleted(word)
+        textDocumentProxy.insertText(" ")
+        glideInserted = word
+        glideChips = cands
+        autoShiftIfNeeded()
+        updateSuggestions()
+    }
+
+    /// v0.23 glide scoring: a word fits if its folded skeleton (double
+    /// letters collapsed) is a subsequence of the traced path and starts
+    /// with the path's first letter. Frequency, his own words and an
+    /// exact-path match break the ties.
+    private func glideCandidates(path: [Character]) -> [String] {
+        let p = String(path)
+        guard p.count >= 2, let first = p.first else { return [] }
+        var best: [String: (word: String, score: Int)] = [:]
+        func consider(_ surface: String, bonus: Int) {
+            let skel = dedupeFolded(surface)
+            guard skel.count >= 2, skel.first == first else { return }
+            guard isSubsequence(skel, of: p) else { return }
+            var s = bonus
+            if skel == p { s += 120 }
+            if skel.last == p.last { s += 40 }
+            s += Int(20.0 * Double(skel.count) / Double(p.count))
+            s -= abs(skel.count - p.count) * 3
+            let key = fold(surface)
+            if s > (best[key]?.score ?? Int.min) { best[key] = (surface, s) }
+        }
+        for w in personal { consider(w, bonus: 60) }
+        for (w, c) in learned { consider(w, bonus: min(40, c * 4)) }
+        let lists: [[String]] = lang == "en" ? [WordLists.en]
+            : lang == "bi" ? [WordLists.es, WordLists.en]
+            : [WordLists.es]
+        for list in lists {
+            for (i, w) in list.enumerated() {
+                consider(w, bonus: max(0, 24 - i / 250))
+            }
+        }
+        return best.values.sorted { $0.score > $1.score }.prefix(5).map { $0.word }
+    }
+
+    private func dedupeFolded(_ w: String) -> String {
+        var out: [Character] = []
+        for ch in fold(w) where out.last != ch { out.append(ch) }
+        return String(out)
+    }
+
+    private func isSubsequence(_ needle: String, of hay: String) -> Bool {
+        var it = hay.makeIterator()
+        for ch in needle {
+            var found = false
+            while let h = it.next() { if h == ch { found = true; break } }
+            if !found { return false }
+        }
+        return true
     }
 
     /// The classic key popup: the letter, enlarged, above the key — visual
@@ -2881,6 +3031,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func spaceTapped() {
+        glideChips = nil; glideInserted = nil   // v0.23: a fresh space ends the glide offer
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: word boundary
         completeWord()   // the word before this space is complete
         localWord = ""
@@ -2923,6 +3074,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func returnTapped() {
+        glideChips = nil; glideInserted = nil   // v0.23
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4
         completeWord()
         localWord = ""
@@ -2938,6 +3090,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func deleteTapped() {
+        glideChips = nil; glideInserted = nil   // v0.23
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: base char may be gone
         textDocumentProxy.deleteBackward()
         if !localWord.isEmpty { localWord.removeLast() }
