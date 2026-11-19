@@ -2218,7 +2218,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.27i Speed Lab", "")
+        flashBar("MyKeys v0.28i Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -3038,140 +3038,220 @@ class KeyboardViewController: UIInputViewController {
         updateSuggestions()
     }
 
-    /// v0.25 glide scoring — GEOMETRY first (Brian's traces, logged
-    /// 2026-11-19, are wide fast sweeps: needed letters get crossed
-    /// out of order, so the v0.23 subsequence test made his real
-    /// words impossible and junk won). A word now fits if every one
-    /// of its letters lies NEAR the trace, however the finger got
-    /// there; closeness, start/end anchoring, letter order, frequency
-    /// and his own words then rank the survivors.
+    /// v0.28i glide — the OTHER PLAN (Brian's call, 2026-11-19,
+    /// after the geometric scorer also failed his traces):
+    /// FlorisBoard's StatisticalGlideTypingClassifier, ported
+    /// faithfully from their Apache-2.0 Kotlin (itself from
+    /// AnySoftKeyboard). The user trace and each candidate word's
+    /// IDEAL gesture (a polyline through the word's key centres)
+    /// are both resampled to 200 points; two Gaussians score the
+    /// match — SHAPE (bounding-box-normalized, std 22.08) and
+    /// LOCATION (raw Manhattan, std 0.5109 x key radius) — and
+    /// word frequency multiplies in. Candidates are pruned by
+    /// (first, last) key buckets (2 closest keys at each end) and
+    /// by ideal-gesture length (8.42 x radius). Double letters get
+    /// a second ideal gesture with a little LOOP around the key,
+    /// so "pool" and "poll" can be told apart. Scores are computed
+    /// in log space (same ranking, no underflow). His bigram
+    /// context stays on top as a small bonus.
     private func glideCandidates(path: [Character], points: [CGPoint]) -> [String] {
-        let p = String(path)
-        guard p.count >= 2, let first = p.first else { return [] }
-        let second: Character? = p.count >= 3 ? p[p.index(after: p.startIndex)] : nil
-        // Thin the samples to at most ~80 for speed.
-        var samples = points
-        if samples.count > 80 {
-            let stride = Int(ceil(Double(samples.count) / 80.0))
-            samples = samples.enumerated().filter { $0.offset % stride == 0 }.map { $0.element }
-        }
-        // Key centres in the same (window) coordinates as the points.
+        guard points.count >= 2 else { return [] }
+        // Key centres + size, in window coordinates (same as points).
         var centres: [Character: CGPoint] = [:]
+        var keyW = 0.0, keyH = 0.0
         for b in KeyButton.slideTargets {
             guard let raw = b.accessibilityLabel ?? b.title(for: .normal),
                   let ch = fold(raw).first else { continue }
             let f = KeyButton.frameCache[ObjectIdentifier(b)] ?? b.convert(b.bounds, to: nil)
             centres[ch] = CGPoint(x: f.midX, y: f.midY)
+            if keyW == 0 { keyW = Double(f.width); keyH = Double(f.height) }
         }
-        let geo = !samples.isEmpty && !centres.isEmpty
-        var near: Set<Character> = []
-        if geo {
-            for (ch, c) in centres {
-                for s in samples where hypot(s.x - c.x, s.y - c.y) <= 36 { near.insert(ch); break }
+        guard centres.count >= 20, keyW > 0 else { return [] }
+        let radius = min(keyW, keyH)
+        // FlorisBoard thins gesture points: a new point must be at
+        // least keyWidth/4 away from the last kept one.
+        let thinSq = (keyW / 4) * (keyW / 4)
+        var trace: [CGPoint] = []
+        for pt in points {
+            if let last = trace.last {
+                let dx = Double(pt.x - last.x), dy = Double(pt.y - last.y)
+                if dx * dx + dy * dy <= thinSq { continue }
             }
+            trace.append(pt)
         }
-        // v0.26 audit fix: the previous word's bigram followers get a
-        // context bonus — after "voy a", infinitives should beat
-        // spatial rivals (AOSP rescoring, cheap version).
+        guard trace.count >= 2 else { return [] }
+        let userResampled = glideResample(trace, 200)
+        let userNorm = glideNormalize(userResampled)
+        let userLength = glideLength(trace)
+        // Prune by extremities: the 2 closest keys to each end.
+        func closest2(_ pt: CGPoint) -> [Character] {
+            centres.sorted { a, b in
+                hypot(pt.x - a.value.x, pt.y - a.value.y)
+                    < hypot(pt.x - b.value.x, pt.y - b.value.y)
+            }.prefix(2).map { $0.key }
+        }
+        let startKeys = closest2(trace.first!)
+        let endKeys = closest2(trace.last!)
         let prevFollowers: [String: Int]? = lastCompletedWord.flatMap { bigrams[$0.lowercased()] }
-        var best: [String: (word: String, score: Int)] = [:]
-        func consider(_ surface: String, skel: String, foldedForm: String, bonus: Int) {
-            guard skel.count >= 2 else { return }
-            guard skel.first == first || skel.first == second else { return }
-            var s = bonus
+        var best: [String: (word: String, score: Double)] = [:]
+        func consider(_ surface: String, foldedForm: String, freqProb: Double) {
+            guard foldedForm.count >= 2 else { return }
+            // Ideal gestures: plain + loop variant for double letters.
+            var plain: [CGPoint] = []
+            var loops: [CGPoint] = []
+            var hasLoops = false
+            var prev: Character? = nil
+            for ch in foldedForm {
+                guard let c = centres[ch] else { continue }
+                plain.append(c)
+                if prev == ch {
+                    hasLoops = true
+                    let dx = CGFloat(keyW / 4), dy = CGFloat(keyH / 4)
+                    loops.append(CGPoint(x: c.x + dx, y: c.y + dy))
+                    loops.append(CGPoint(x: c.x + dx, y: c.y - dy))
+                    loops.append(CGPoint(x: c.x - dx, y: c.y - dy))
+                    loops.append(CGPoint(x: c.x - dx, y: c.y + dy))
+                } else {
+                    loops.append(c)
+                }
+                prev = ch
+            }
+            guard plain.count >= 2 else { return }
+            // Length pruning (FlorisBoard: 8.42 x radius).
+            if abs(userLength - glideLength(plain)) >= 8.42 * radius { return }
+            var score = -Double.greatestFiniteMagnitude
+            let variants = hasLoops ? [plain, loops] : [plain]
+            for v in variants {
+                let rs = glideResample(v, 200)
+                let shape = glideShapeDistance(glideNormalize(rs), userNorm)
+                let loc = glideLocationDistance(rs, userResampled)
+                let s = glideLogGauss(shape, 22.08)
+                    + glideLogGauss(loc, 0.5109 * radius)
+                    + log(max(freqProb, 0.0005))
+                if s > score { score = s }
+            }
             if let fol = prevFollowers,
                let c = fol[surface] ?? fol[surface.lowercased()] {
-                s += min(30, c * 6)
+                score += min(1.5, Double(c) * 0.3)
             }
-            if skel.first != first { s -= 15 }
-            if isSubsequence(skel, of: p) { s += 30 }   // order still counts
-            if skel == p { s += 90 }
-            if skel.last == p.last { s += 25 }
-            if geo {
-                var total = 0.0
-                for ch in skel {
-                    guard let c = centres[ch], near.contains(ch) else { return }
-                    var dmin = Double.greatestFiniteMagnitude
-                    for smp in samples { dmin = min(dmin, Double(hypot(smp.x - c.x, smp.y - c.y))) }
-                    total += dmin
-                }
-                let avg = total / Double(skel.count)
-                s += max(0, 55 - Int(avg))
-                if let sc = samples.first, let c0 = centres[skel.first!] {
-                    if hypot(sc.x - c0.x, sc.y - c0.y) > 46 { s -= 25 }
-                }
-                if let ec = samples.last, let c1 = centres[skel.last!] {
-                    if hypot(ec.x - c1.x, ec.y - c1.y) > 46 { s -= 25 }
-                }
-            } else {
-                guard isSubsequence(skel, of: p) else { return }
-                s += Int(20.0 * Double(skel.count) / Double(p.count))
+            if score > (best[foldedForm]?.score ?? -Double.greatestFiniteMagnitude) {
+                best[foldedForm] = (surface, score)
             }
-            s -= abs(skel.count - p.count) * 2
-            if s > (best[foldedForm]?.score ?? Int.min) { best[foldedForm] = (surface, s) }
         }
-        for w in personal { consider(w, skel: dedupeFolded(w), foldedForm: fold(w), bonus: 60) }
-        for (w, c) in learned { consider(w, skel: dedupeFolded(w), foldedForm: fold(w), bonus: min(40, c * 4)) }
-        // v0.26 audit fix: dictionary words come from the first-letter
-        // buckets with PRECOMPUTED skeletons — v0.25 re-folded all
-        // ~20k words on every single swipe.
+        // Candidate pool from the (first, last) buckets.
         let listSpecs: [([String], [String], String)] = lang == "en"
             ? [(WordLists.en, foldedEN, "en")]
             : lang == "bi" ? [(WordLists.es, foldedES, "es"), (WordLists.en, foldedEN, "en")]
             : [(WordLists.es, foldedES, "es")]
         for (words, folded, code) in listSpecs {
-            let (skels, buckets) = glideData(for: code, folded: folded)
+            let pairs = glidePairs(for: code, folded: folded)
             var idxs = Set<Int>()
-            if let b = buckets[first] { idxs.formUnion(b) }
-            if let sec = second, let b = buckets[sec] { idxs.formUnion(b) }
-            for i in idxs.sorted() {
-                consider(words[i], skel: skels[i], foldedForm: folded[i],
-                         bonus: max(0, 24 - i / 250))
+            for s in startKeys { for e in endKeys {
+                if let b = pairs["\(s)\(e)"] { idxs.formUnion(b) }
+            } }
+            let total = Double(words.count)
+            for i in idxs {
+                consider(words[i], foldedForm: folded[i],
+                         freqProb: (total - Double(i)) / total)
             }
         }
+        for w in personal { consider(w, foldedForm: fold(w), freqProb: 0.999) }
+        for (w, _) in learned { consider(w, foldedForm: fold(w), freqProb: 0.99) }
         return best.values.sorted { $0.score > $1.score }.prefix(5).map { $0.word }
     }
 
-    /// v0.26: per-language glide index, built ONCE (lazily): the
-    /// deduped skeleton of every dictionary word + buckets of word
-    /// indices by first folded letter.
-    private var skelCacheES: [String]? = nil
-    private var skelCacheEN: [String]? = nil
-    private var bucketCacheES: [Character: [Int]]? = nil
-    private var bucketCacheEN: [Character: [Int]]? = nil
-    private func glideData(for code: String, folded: [String])
-        -> (skel: [String], buckets: [Character: [Int]]) {
-        if code == "en", let s = skelCacheEN, let b = bucketCacheEN { return (s, b) }
-        if code == "es", let s = skelCacheES, let b = bucketCacheES { return (s, b) }
-        var skels: [String] = []
-        skels.reserveCapacity(folded.count)
-        var buckets: [Character: [Int]] = [:]
+    /// v0.28i: per-language (first, last) folded-letter buckets —
+    /// the FlorisBoard pruner's word tree. Built once, lazily.
+    private var pairCacheES: [String: [Int]]? = nil
+    private var pairCacheEN: [String: [Int]]? = nil
+    private func glidePairs(for code: String, folded: [String]) -> [String: [Int]] {
+        if code == "en", let p = pairCacheEN { return p }
+        if code == "es", let p = pairCacheES { return p }
+        var pairs: [String: [Int]] = [:]
         for (i, w) in folded.enumerated() {
-            var out: [Character] = []
-            for ch in w where out.last != ch { out.append(ch) }
-            let skel = String(out)
-            skels.append(skel)
-            if let f = skel.first { buckets[f, default: []].append(i) }
+            guard let f = w.first, let l = w.last else { continue }
+            pairs["\(f)\(l)", default: []].append(i)
         }
-        if code == "en" { skelCacheEN = skels; bucketCacheEN = buckets }
-        else { skelCacheES = skels; bucketCacheES = buckets }
-        return (skels, buckets)
+        if code == "en" { pairCacheEN = pairs } else { pairCacheES = pairs }
+        return pairs
     }
 
-    private func dedupeFolded(_ w: String) -> String {
-        var out: [Character] = []
-        for ch in fold(w) where out.last != ch { out.append(ch) }
-        return String(out)
+    /// Resample a polyline to exactly n points, evenly by arc length.
+    private func glideResample(_ pts: [CGPoint], _ n: Int) -> [CGPoint] {
+        guard pts.count >= 2 else { return pts }
+        let total = glideLength(pts)
+        guard total > 0 else { return Array(repeating: pts[0], count: n) }
+        let step = total / Double(n - 1)
+        var out: [CGPoint] = [pts[0]]
+        var prev = pts[0]
+        var acc = 0.0
+        var i = 1
+        while i < pts.count && out.count < n {
+            let cur = pts[i]
+            let d = Double(hypot(cur.x - prev.x, cur.y - prev.y))
+            if acc + d >= step, d > 0 {
+                let t = CGFloat((step - acc) / d)
+                let np = CGPoint(x: prev.x + t * (cur.x - prev.x),
+                                 y: prev.y + t * (cur.y - prev.y))
+                out.append(np)
+                prev = np
+                acc = 0
+            } else {
+                acc += d
+                prev = cur
+                i += 1
+            }
+        }
+        while out.count < n { out.append(pts.last!) }
+        return out
     }
 
-    private func isSubsequence(_ needle: String, of hay: String) -> Bool {
-        var it = hay.makeIterator()
-        for ch in needle {
-            var found = false
-            while let h = it.next() { if h == ch { found = true; break } }
-            if !found { return false }
+    private func glideLength(_ pts: [CGPoint]) -> Double {
+        var L = 0.0
+        if pts.count < 2 { return 0 }
+        for i in 1..<pts.count {
+            L += Double(hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y))
         }
-        return true
+        return L
+    }
+
+    /// FlorisBoard normalizeByBoxSide: divide by the longest
+    /// bounding-box side and centre on the box centroid.
+    private func glideNormalize(_ pts: [CGPoint]) -> [CGPoint] {
+        var minX = Double.greatestFiniteMagnitude, maxX = -Double.greatestFiniteMagnitude
+        var minY = Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        for p in pts {
+            minX = min(minX, Double(p.x)); maxX = max(maxX, Double(p.x))
+            minY = min(minY, Double(p.y)); maxY = max(maxY, Double(p.y))
+        }
+        let side = max(max(maxX - minX, maxY - minY), 0.00001)
+        let cx = ((maxX - minX) / 2 + minX) / side
+        let cy = ((maxY - minY) / 2 + minY) / side
+        return pts.map { CGPoint(x: Double($0.x) / side - cx,
+                                 y: Double($0.y) / side - cy) }
+    }
+
+    /// SUM of Euclidean distances over the resampled points
+    /// (FlorisBoard does not average the shape distance).
+    private func glideShapeDistance(_ a: [CGPoint], _ b: [CGPoint]) -> Double {
+        var t = 0.0
+        for i in 0..<min(a.count, b.count) {
+            t += Double(hypot(a[i].x - b[i].x, a[i].y - b[i].y))
+        }
+        return t
+    }
+
+    /// Mean Manhattan distance / 2 (FlorisBoard's location distance).
+    private func glideLocationDistance(_ a: [CGPoint], _ b: [CGPoint]) -> Double {
+        let n = min(a.count, b.count)
+        guard n > 0 else { return 0 }
+        var t = 0.0
+        for i in 0..<n { t += Double(abs(a[i].x - b[i].x) + abs(a[i].y - b[i].y)) }
+        return t / Double(n) / 2
+    }
+
+    private func glideLogGauss(_ v: Double, _ std: Double) -> Double {
+        -log(std * sqrt(2 * Double.pi)) - 0.5 * (v / std) * (v / std)
     }
 
     /// The classic key popup: the letter, enlarged, above the key — visual

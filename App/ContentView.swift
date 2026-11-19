@@ -1,24 +1,14 @@
 import SwiftUI
 
-// The fixed test suite. Same texts every build so versions compare honestly.
-// Written in Brian's real style: closing ? and ! only, never opening ¿ ¡
-// (the keyboard still offers ¿ ¡ on long-press, for completeness).
-// Suite v2 (Brian, 2026-11-14): SEVEN texts were too many. Only two
-// from now on — the original Spanish text 1 and the English pangram
-// (old text 4). The blind test is retired: the blind-typing dream was
-// closed with the 2026-11-13 reframe, so it no longer measures
-// anything he is aiming at.
+// Describe prompts (v0.25i): Brian describes each prompt in his
+// own words with MyKeys — no copying, so his head is on the
+// keyboard, not on a text. v0.28i (Brian, 2026-11-19): ten prompts
+// were too many — only FOUR now: two in Spanish, two in English.
 private let prompts: [String] = [
-    "Describe tu casa: cómo es, qué hay en cada cuarto y qué te gusta más de ella.",
     "Describe a Pelusa: cómo se ve, qué hace todo el día y cuáles son sus mañas.",
     "Describe Ogawamachi: sus calles, el río, las montañas y la gente.",
-    "Describe tu comida favorita: cómo se ve, a qué huele, cómo sabe y cuándo la comes.",
-    "Describe a Leo: cómo es, qué le gusta y qué hicieron juntos últimamente.",
-    "Describe un día perfecto para ti, desde que despiertas hasta que duermes.",
     "Describe this scene in your own words: a penguin with a backpack arrives at a small train station in Japan.",
-    "Describe your car, El Chato: the color, the inside, and where you like to drive it.",
-    "Describe lo que ves por la ventana más cercana en este momento, con todo el detalle que puedas.",
-    "Describe un videojuego que amas a alguien que nunca ha jugado en su vida."
+    "Describe your car, El Chato: the color, the inside, and where you like to drive it."
 ]
 
 // v0.8 (Brian): the app and the keyboard share ONE drawer (App Groups)
@@ -166,7 +156,7 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.27i")
+                        Text("v0.28i")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
