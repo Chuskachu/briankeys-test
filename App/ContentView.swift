@@ -8,9 +8,17 @@ import SwiftUI
 // (old text 4). The blind test is retired: the blind-typing dream was
 // closed with the 2026-11-13 reframe, so it no longer measures
 // anything he is aiming at.
-private let testTexts: [String] = [
-    "Hola, amigos. Estamos probando el teclado nuevo con las teclas más chicas y la verdad se siente muy bien. Mañana salimos a las 9 para Ogawamachi, llevamos a Leo a jugar un rato y después comemos algo rico en familia. Qué alegría poder escribir así de rápido, sin pelear con cada palabra!!!",
-    "The quick brown fox jumps over the lazy dog. We are testing the new keyboard with the smaller keys and it honestly feels great. Tomorrow we leave at 9, take the train into the city, and spend the whole day walking around with Leo and Rocio."
+private let prompts: [String] = [
+    "Describe tu casa: cómo es, qué hay en cada cuarto y qué te gusta más de ella.",
+    "Describe a Pelusa: cómo se ve, qué hace todo el día y cuáles son sus mañas.",
+    "Describe Ogawamachi: sus calles, el río, las montañas y la gente.",
+    "Describe tu comida favorita: cómo se ve, a qué huele, cómo sabe y cuándo la comes.",
+    "Describe a Leo: cómo es, qué le gusta y qué hicieron juntos últimamente.",
+    "Describe un día perfecto para ti, desde que despiertas hasta que duermes.",
+    "Describe this scene in your own words: a penguin with a backpack arrives at a small train station in Japan.",
+    "Describe your car, El Chato: the color, the inside, and where you like to drive it.",
+    "Describe lo que ves por la ventana más cercana en este momento, con todo el detalle que puedas.",
+    "Describe un videojuego que amas a alguien que nunca ha jugado en su vida."
 ]
 
 // v0.8 (Brian): the app and the keyboard share ONE drawer (App Groups)
@@ -146,7 +154,7 @@ struct DictionaryView: View {
 }
 
 struct ContentView: View {
-    @State private var attempts: [String] = Array(repeating: "", count: testTexts.count)
+    @State private var attempts: [String] = Array(repeating: "", count: prompts.count)
 
     var body: some View {
         NavigationStack {
@@ -158,7 +166,7 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.24")
+                        Text("v0.25")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -207,18 +215,18 @@ struct ContentView: View {
 
                     Divider()
 
-                    Text("Test texts")
+                    Text("Describe prompts")
                         .font(.title3)
                         .bold()
 
-                    Text("Type each text as fast as you can, right here with MyKeys. Do NOT fix the typos: the typos are the data. At the end, tap “Copy ALL” and paste it all into the chat in one go.")
+                    Text("Describe each prompt in your own words, right here with MyKeys. Think about the idea, not about copying: concentrate on the keyboard. Do NOT fix the typos: the typos are the data. At the end, tap “Copy ALL” and paste it all into the chat in one go.")
                         .font(.body)
 
                     HStack {
                         Button("📋 Copy ALL") {
                             var parts = ["MyKeys — resultados de la suite"]
-                            for i in testTexts.indices where !attempts[i].isEmpty {
-                                parts.append("\(i + 1). Meta: \(testTexts[i])\n   Intento: \(attempts[i])")
+                            for i in prompts.indices where !attempts[i].isEmpty {
+                                parts.append("\(i + 1). Prompt: \(prompts[i])\n   Escrito: \(attempts[i])")
                             }
                             UIPasteboard.general.string = parts.joined(separator: "\n")
                         }
@@ -226,15 +234,15 @@ struct ContentView: View {
                         .disabled(attempts.allSatisfy { $0.isEmpty })
 
                         Button("Clear all") {
-                            attempts = Array(repeating: "", count: testTexts.count)
+                            attempts = Array(repeating: "", count: prompts.count)
                         }
                         .buttonStyle(.bordered)
                         .disabled(attempts.allSatisfy { $0.isEmpty })
                     }
 
-                    ForEach(testTexts.indices, id: \.self) { i in
+                    ForEach(prompts.indices, id: \.self) { i in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("\(i + 1). \(testTexts[i])")
+                            Text("\(i + 1). \(prompts[i])")
                                 .font(.headline)
 
                             TextField("Your attempt…", text: $attempts[i], axis: .vertical)

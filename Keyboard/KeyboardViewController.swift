@@ -58,6 +58,8 @@ private class KeyButton: UIButton {
     var onSlideCommit: ((KeyButton, CGPoint) -> Void)?
     /// v0.23: glide typing needs the lift moment (the guess lands then).
     var onSlideEnd: (() -> Void)?
+    /// v0.25: glide v3 scores the trace's GEOMETRY — the raw points.
+    var onGlidePoint: ((CGPoint) -> Void)?
     private var slidCommitted: Set<ObjectIdentifier> = []
 
     // v0.5 (Brian): flick DOWN on the space bar = Enter (the Return key
@@ -93,6 +95,9 @@ private class KeyButton: UIButton {
            t.location(in: nil).y - startY >= 24 {
             flickFired = true
             onFlickDown?()
+        }
+        if let gp = onGlidePoint, let t = touches.first {
+            gp(t.location(in: nil))
         }
         guard slideEnabled, let touch = touches.first, let handler = onSlideCommit else { return }
         let p = touch.location(in: nil)   // window coordinates
@@ -173,6 +178,9 @@ class KeyboardViewController: UIInputViewController {
     private var glideBaseCount = 0
     private var glideChips: [String]? = nil
     private var glideInserted: String? = nil
+    /// v0.25: the trace's raw points (window coords, thinned) — the
+    /// geometric scorer measures distance to them, not key order.
+    private var glidePoints: [CGPoint] = []
     /// v0.8 (Brian): his words lived in ONE drawer shared between the
     /// app and the keyboard (App Groups). v0.16 (Brian): that drawer
     /// never existed under SideStore — the unsigned build drops the
@@ -828,6 +836,7 @@ class KeyboardViewController: UIInputViewController {
         b.slideEnabled = true
         b.onSlideCommit = { [weak self] target, pt in self?.slideCommit(target, windowPoint: pt, via: "slide") }
         b.onSlideEnd = { [weak self] in self?.slideEnded() }
+        b.onGlidePoint = { [weak self] pt in self?.recordGlidePoint(pt) }
         slideKeys.append(b)
         if !variants.isEmpty { addLongPress(to: b) }
         return b
@@ -2154,7 +2163,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.24 Speed Lab", "")
+        flashBar("MyKeys v0.25 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2916,17 +2925,26 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    /// v0.25: collect the trace's raw points while gliding (thinned
+    /// to ~6pt spacing so the scorer stays fast).
+    private func recordGlidePoint(_ pt: CGPoint) {
+        guard slideMode == 2 else { return }
+        if let last = glidePoints.last, hypot(pt.x - last.x, pt.y - last.y) < 6 { return }
+        if glidePoints.count < 400 { glidePoints.append(pt) }
+    }
+
     /// v0.23: the finger lifted. In Words mode, if the drag really
     /// crossed keys, turn the traced path into a word.
     private func slideEnded() {
         let path = glidePath
         let crossings = glideCrossings
         let base = glideBaseCount
-        glidePath = []; glideCrossings = 0; glideBaseCount = 0
+        let pts = glidePoints
+        glidePath = []; glideCrossings = 0; glideBaseCount = 0; glidePoints = []
         guard slideMode == 2 else { return }
         guard variantStrip == nil || variantStrip.isHidden else { return }
         guard crossings >= 1, path.count >= 2 else { return }
-        let cands = glideCandidates(path: path)
+        let cands = glideCandidates(path: path, points: pts)
         // v0.24: every real trace goes to the touch log with its
         // outcome, so a bad glide is data, not a mystery.
         if logEnabled {
@@ -2960,28 +2978,69 @@ class KeyboardViewController: UIInputViewController {
         updateSuggestions()
     }
 
-    /// v0.23 glide scoring: a word fits if its folded skeleton (double
-    /// letters collapsed) is a subsequence of the traced path and starts
-    /// with the path's first letter. Frequency, his own words and an
-    /// exact-path match break the ties.
-    private func glideCandidates(path: [Character]) -> [String] {
+    /// v0.25 glide scoring — GEOMETRY first (Brian's traces, logged
+    /// 2026-11-19, are wide fast sweeps: needed letters get crossed
+    /// out of order, so the v0.23 subsequence test made his real
+    /// words impossible and junk won). A word now fits if every one
+    /// of its letters lies NEAR the trace, however the finger got
+    /// there; closeness, start/end anchoring, letter order, frequency
+    /// and his own words then rank the survivors.
+    private func glideCandidates(path: [Character], points: [CGPoint]) -> [String] {
         let p = String(path)
         guard p.count >= 2, let first = p.first else { return [] }
-        // v0.24: a trace often starts one key off — the word may begin
-        // on the path's second key (small penalty, exact start wins).
         let second: Character? = p.count >= 3 ? p[p.index(after: p.startIndex)] : nil
+        // Thin the samples to at most ~80 for speed.
+        var samples = points
+        if samples.count > 80 {
+            let stride = Int(ceil(Double(samples.count) / 80.0))
+            samples = samples.enumerated().filter { $0.offset % stride == 0 }.map { $0.element }
+        }
+        // Key centres in the same (window) coordinates as the points.
+        var centres: [Character: CGPoint] = [:]
+        for b in KeyButton.slideTargets {
+            guard let raw = b.accessibilityLabel ?? b.title(for: .normal),
+                  let ch = fold(raw).first else { continue }
+            let f = KeyButton.frameCache[ObjectIdentifier(b)] ?? b.convert(b.bounds, to: nil)
+            centres[ch] = CGPoint(x: f.midX, y: f.midY)
+        }
+        let geo = !samples.isEmpty && !centres.isEmpty
+        var near: Set<Character> = []
+        if geo {
+            for (ch, c) in centres {
+                for s in samples where hypot(s.x - c.x, s.y - c.y) <= 36 { near.insert(ch); break }
+            }
+        }
         var best: [String: (word: String, score: Int)] = [:]
         func consider(_ surface: String, bonus: Int) {
             let skel = dedupeFolded(surface)
             guard skel.count >= 2 else { return }
             guard skel.first == first || skel.first == second else { return }
-            guard isSubsequence(skel, of: p) else { return }
             var s = bonus
             if skel.first != first { s -= 15 }
-            if skel == p { s += 120 }
-            if skel.last == p.last { s += 40 }
-            s += Int(20.0 * Double(skel.count) / Double(p.count))
-            s -= abs(skel.count - p.count) * 3
+            if isSubsequence(skel, of: p) { s += 30 }   // order still counts
+            if skel == p { s += 90 }
+            if skel.last == p.last { s += 25 }
+            if geo {
+                var total = 0.0
+                for ch in skel {
+                    guard let c = centres[ch], near.contains(ch) else { return }
+                    var dmin = Double.greatestFiniteMagnitude
+                    for smp in samples { dmin = min(dmin, Double(hypot(smp.x - c.x, smp.y - c.y))) }
+                    total += dmin
+                }
+                let avg = total / Double(skel.count)
+                s += max(0, 55 - Int(avg))
+                if let sc = samples.first, let c0 = centres[skel.first!] {
+                    if hypot(sc.x - c0.x, sc.y - c0.y) > 46 { s -= 25 }
+                }
+                if let ec = samples.last, let c1 = centres[skel.last!] {
+                    if hypot(ec.x - c1.x, ec.y - c1.y) > 46 { s -= 25 }
+                }
+            } else {
+                guard isSubsequence(skel, of: p) else { return }
+                s += Int(20.0 * Double(skel.count) / Double(p.count))
+            }
+            s -= abs(skel.count - p.count) * 2
             let key = fold(surface)
             if s > (best[key]?.score ?? Int.min) { best[key] = (surface, s) }
         }
