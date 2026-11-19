@@ -211,6 +211,7 @@ class KeyboardViewController: UIInputViewController {
         keyRowH = CGFloat(min(66, max(46, settingInt(keyHKey, default: 56))))
         keyGap = CGFloat(min(6, max(0, settingInt(keyGapKey, default: 0))))
         bordersOn = settingBool(bordersKey, default: true)
+        enterKeyOn = settingBool(enterKeyKey, default: false)
         keyFont = CGFloat(min(30, max(18, settingInt(fontKey, default: 22))))
         themeName = wordStore.string(forKey: themeKey)
             ?? UserDefaults.standard.string(forKey: themeKey) ?? "auto"
@@ -242,6 +243,8 @@ class KeyboardViewController: UIInputViewController {
     private let keyHKey = "bk_key_h_v1"
     private let keyGapKey = "bk_key_gap_v1"
     private let bordersKey = "bk_borders_v1"
+    private let enterKeyKey = "bk_enter_v1"   // v0.26: optional ⏎ key
+    private var enterKeyOn = false
     private let fontKey = "bk_font_v1"
     private let themeKey = "bk_theme_v1"
     private let hapticKey = "bk_haptic_v1"
@@ -261,6 +264,7 @@ class KeyboardViewController: UIInputViewController {
     private var edSlideMode = 2
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
     private var edFont: CGFloat = 22, edTheme = "auto", edHaptic = 2
+    private var edEnter = false   // v0.26: staged Enter-key option
     private var edLang = "es"   // v0.21: es | en | bi
     private var edChipFont: CGFloat = 17
     /// v0.12 (Brian): the big words editor — a full page like the
@@ -562,6 +566,7 @@ class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         flushLog()   // v0.2: don't strand buffered log events
+        flushStores()   // v0.26: don't strand un-persisted learning
     }
 
     override func viewDidLayoutSubviews() {
@@ -1017,11 +1022,14 @@ class KeyboardViewController: UIInputViewController {
         wordStore.set(emojiCounts, forKey: "bk_emoji_counts_v1")
         wordStore.set(emojiRecents, forKey: "bk_emoji_recents_v1")
         emojiStale = true   // v0.15: the cached ⭐ Top must rebuild
+        topEmojisCache = nil   // v0.26: the slot's cache too
     }
 
     /// ⭐ Top (Brian's order): most used first, then recently used
     /// ones that are not already in the most-used list.
+    private var topEmojisCache: [String]? = nil   // v0.26 audit fix
     private func topEmojis() -> [String] {
+        if let c = topEmojisCache { return c }
         ensureEmojiUse()
         let most = emojiCounts.sorted { a, b in
             if a.value != b.value { return a.value > b.value }
@@ -1041,9 +1049,10 @@ class KeyboardViewController: UIInputViewController {
                 seen.insert(st)
                 combined.append(st)
             }
+            topEmojisCache = combined
             return combined
         }
-        if !combined.isEmpty { return combined }
+        if !combined.isEmpty { topEmojisCache = combined; return combined }
         return ["😀", "😂", "😍", "😎", "🤔", "👍", "❤️", "🔥", "🙏", "🎉", "😅", "🤓", "😊", "🥹", "😴", "🤯"]
     }
 
@@ -1274,6 +1283,15 @@ class KeyboardViewController: UIInputViewController {
         // thumb lands anyway — and Enter lives in the downward flick on
         // the bar (see spaceFlickedToEnter). Flick only, no long-press
         // Enter: the long-press is the trackpad now (v0.9).
+        //
+        // v0.26 (Brian): …and now it can COME BACK, as HIS choice —
+        // Editor → Enter. The space bar yields its right end to a ⏎
+        // key and returns to a normal width; the flick keeps working.
+        if enterKeyOn {
+            let enter = functionKey("⏎", action: #selector(returnTapped))
+            enter.widthAnchor.constraint(equalToConstant: 54).isActive = true
+            row.addArrangedSubview(enter)
+        }
 
         return row
     }
@@ -1407,6 +1425,23 @@ class KeyboardViewController: UIInputViewController {
     }
 
     /// Count a word so the bar learns Brian's vocabulary.
+    // v0.26 audit fix: learned/bigram stores used to serialize in
+    // full on EVERY completed word. Now: mark dirty, flush at most
+    // every 5 s and when the keyboard disappears.
+    private var storeDirty = false
+    private var lastStoreFlush = Date.distantPast
+    private func markStoreDirty() {
+        storeDirty = true
+        if Date().timeIntervalSince(lastStoreFlush) > 5 { flushStores() }
+    }
+    private func flushStores() {
+        guard storeDirty else { return }
+        storeDirty = false
+        lastStoreFlush = Date()
+        wordStore.set(learned, forKey: learnedKey)
+        wordStore.set(bigrams, forKey: bigramKey)
+    }
+
     private func learn(_ w: String) {
         guard w.count >= 2 else { return }
         learned[w, default: 0] += 1
@@ -1416,7 +1451,7 @@ class KeyboardViewController: UIInputViewController {
                 learned.sorted { $0.value > $1.value }.prefix(400).map { ($0.key, $0.value) })
             learnedFolded = Dictionary(uniqueKeysWithValues: learned.keys.map { ($0, fold($0)) })
         }
-        wordStore.set(learned, forKey: learnedKey)
+        markStoreDirty()
     }
 
     /// A word was just completed (space / punctuation / return): first
@@ -1594,6 +1629,43 @@ class KeyboardViewController: UIInputViewController {
         return true
     }
 
+    /// v0.26 (AOSP audit): physical key neighbours, from the actual
+    /// rows — a graze substitution (i for o) should outrank a far-key
+    /// substitution of a slightly more frequent word.
+    private let keyNeighbours: [Character: Set<Character>] = {
+        let rows = ["qwertyuiop", "asdfghjklñ", "zxcvbnm"].map { Array($0) }
+        var map: [Character: Set<Character>] = [:]
+        for (r, row) in rows.enumerated() {
+            for (i, ch) in row.enumerated() {
+                var set: Set<Character> = []
+                for dr in -1...1 {
+                    let rr = r + dr
+                    guard rr >= 0, rr < rows.count else { continue }
+                    for di in -1...1 where !(dr == 0 && di == 0) {
+                        let ii = i + di
+                        if ii >= 0, ii < rows[rr].count { set.insert(rows[rr][ii]) }
+                    }
+                }
+                map[ch] = set
+            }
+        }
+        return map
+    }()
+
+    /// True when a and b differ by exactly one substitution between
+    /// neighbouring keys.
+    private func isNeighbourSub(_ a: String, _ b: String) -> Bool {
+        let x = Array(a), y = Array(b)
+        guard x.count == y.count else { return false }
+        var diff: (Character, Character)? = nil
+        for i in x.indices where x[i] != y[i] {
+            if diff != nil { return false }
+            diff = (x[i], y[i])
+        }
+        guard let (c1, c2) = diff else { return false }
+        return keyNeighbours[c1]?.contains(c2) ?? false
+    }
+
     private func computeSuggestions(for prefix: String) -> [String] {
         if prefix.isEmpty {
             // No word in progress: v0.6 — first, what HIS phrases say
@@ -1734,16 +1806,25 @@ class KeyboardViewController: UIInputViewController {
         // dry, fill the free chips with words one edit away (folded),
         // in dictionary order (= frequency), scanning the top 4000.
         // Offers only: nothing applies without his tap.
+        // v0.26: neighbour substitutions are offered before far ones.
         if out.count < 5, prefix.count >= 3 {
+            var nearC: [String] = [], farC: [String] = []
             for (i, w) in dictWords.enumerated().prefix(4000)
             where !dictFolded[i].hasPrefix(fp) && editDistanceOne(fp, dictFolded[i]) && !out.contains(w) {
+                if isNeighbourSub(fp, dictFolded[i]) { nearC.append(w) } else { farC.append(w) }
+            }
+            for w in nearC + farC {
                 offer(w)
                 if out.count == 5 { break }
             }
         }
         if out.count < 5, lang == "bi", prefix.count >= 3 {
+            var nearC: [String] = [], farC: [String] = []
             for (i, w) in WordLists.en.enumerated().prefix(4000)
             where !foldedEN[i].hasPrefix(fp) && editDistanceOne(fp, foldedEN[i]) && !out.contains(w) {
+                if isNeighbourSub(fp, foldedEN[i]) { nearC.append(w) } else { farC.append(w) }
+            }
+            for w in nearC + farC {
                 offer(w)
                 if out.count == 5 { break }
             }
@@ -1886,7 +1967,7 @@ class KeyboardViewController: UIInputViewController {
             if bigrams.count > 900 {   // prune one-hit wonders
                 bigrams = bigrams.filter { $0.value.values.reduce(0, +) > 1 }
             }
-            wordStore.set(bigrams, forKey: bigramKey)
+            markStoreDirty()
         }
         lastCompletedWord = word
     }
@@ -2163,7 +2244,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.25 Speed Lab", "")
+        flashBar("MyKeys v0.26 Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2208,6 +2289,7 @@ class KeyboardViewController: UIInputViewController {
         edPrudent = prudentEnabled; edPopup = popupEnabled
         edSugg = suggEnabled; edSlideMode = slideMode
         edH = keyRowH; edGap = keyGap; edBorders = bordersOn
+        edEnter = enterKeyOn
         edFont = keyFont; edTheme = themeName; edHaptic = spaceHaptic
         edChipFont = chipFont
         edLang = lang
@@ -2335,6 +2417,7 @@ class KeyboardViewController: UIInputViewController {
 
         let sw3 = editorRow(40)
         sw3.distribution = .fillEqually
+        sw3.addArrangedSubview(editorPill("Enter", on: edEnter, action: #selector(edToggleEnter)))
         sw3.addArrangedSubview(editorPill("Borders", on: edBorders, action: #selector(edToggleBorders)))
         let hint = editorLabel("Preview \u{2193}", size: 13)
         hint.textAlignment = .center
@@ -2457,6 +2540,7 @@ class KeyboardViewController: UIInputViewController {
         m == 2 ? "Words" : m == 1 ? "Letters" : "Off"
     }
     @objc private func edToggleBorders() { edBorders.toggle(); buildKeyboard() }
+    @objc private func edToggleEnter() { edEnter.toggle(); buildKeyboard() }
 
     @objc private func edHeightChanged(_ sender: UISlider) {
         edH = CGFloat(Int(sender.value.rounded()))
@@ -2489,6 +2573,7 @@ class KeyboardViewController: UIInputViewController {
         keyRowH = edH; keyGap = edGap; bordersOn = edBorders
         keyFont = edFont; themeName = edTheme; spaceHaptic = edHaptic
         chipFont = edChipFont
+        enterKeyOn = edEnter
         lang = edLang
         wordStore.set(edLang, forKey: langKey)
         UserDefaults.standard.set(edLang, forKey: langKey)
@@ -2501,7 +2586,8 @@ class KeyboardViewController: UIInputViewController {
         // flip: the keyboard always reads its own last word (v0.11).
         for (key, val) in [(prudentKey, edPrudent), (popupKey, edPopup),
                            (suggKey, edSugg),
-                           (bordersKey, edBorders)] {
+                           (bordersKey, edBorders),
+                           (enterKeyKey, edEnter)] {
             wordStore.set(val, forKey: key)
             UserDefaults.standard.set(val, forKey: key)
         }
@@ -3010,12 +3096,20 @@ class KeyboardViewController: UIInputViewController {
                 for s in samples where hypot(s.x - c.x, s.y - c.y) <= 36 { near.insert(ch); break }
             }
         }
+        // v0.26 audit fix: the previous word's bigram followers get a
+        // context bonus — after "voy a", infinitives should beat
+        // spatial rivals (AOSP rescoring, cheap version).
+        let prevFollowers: [String: Int]? = lastCompletedWord?.lowercased()
+            .flatMap { bigrams[$0] }
         var best: [String: (word: String, score: Int)] = [:]
-        func consider(_ surface: String, bonus: Int) {
-            let skel = dedupeFolded(surface)
+        func consider(_ surface: String, skel: String, foldedForm: String, bonus: Int) {
             guard skel.count >= 2 else { return }
             guard skel.first == first || skel.first == second else { return }
             var s = bonus
+            if let fol = prevFollowers,
+               let c = fol[surface] ?? fol[surface.lowercased()] {
+                s += min(30, c * 6)
+            }
             if skel.first != first { s -= 15 }
             if isSubsequence(skel, of: p) { s += 30 }   // order still counts
             if skel == p { s += 90 }
@@ -3041,20 +3135,54 @@ class KeyboardViewController: UIInputViewController {
                 s += Int(20.0 * Double(skel.count) / Double(p.count))
             }
             s -= abs(skel.count - p.count) * 2
-            let key = fold(surface)
-            if s > (best[key]?.score ?? Int.min) { best[key] = (surface, s) }
+            if s > (best[foldedForm]?.score ?? Int.min) { best[foldedForm] = (surface, s) }
         }
-        for w in personal { consider(w, bonus: 60) }
-        for (w, c) in learned { consider(w, bonus: min(40, c * 4)) }
-        let lists: [[String]] = lang == "en" ? [WordLists.en]
-            : lang == "bi" ? [WordLists.es, WordLists.en]
-            : [WordLists.es]
-        for list in lists {
-            for (i, w) in list.enumerated() {
-                consider(w, bonus: max(0, 24 - i / 250))
+        for w in personal { consider(w, skel: dedupeFolded(w), foldedForm: fold(w), bonus: 60) }
+        for (w, c) in learned { consider(w, skel: dedupeFolded(w), foldedForm: fold(w), bonus: min(40, c * 4)) }
+        // v0.26 audit fix: dictionary words come from the first-letter
+        // buckets with PRECOMPUTED skeletons — v0.25 re-folded all
+        // ~20k words on every single swipe.
+        let listSpecs: [([String], [String], String)] = lang == "en"
+            ? [(WordLists.en, foldedEN, "en")]
+            : lang == "bi" ? [(WordLists.es, foldedES, "es"), (WordLists.en, foldedEN, "en")]
+            : [(WordLists.es, foldedES, "es")]
+        for (words, folded, code) in listSpecs {
+            let (skels, buckets) = glideData(for: code, folded: folded)
+            var idxs = Set<Int>()
+            if let b = buckets[first] { idxs.formUnion(b) }
+            if let sec = second, let b = buckets[sec] { idxs.formUnion(b) }
+            for i in idxs.sorted() {
+                consider(words[i], skel: skels[i], foldedForm: folded[i],
+                         bonus: max(0, 24 - i / 250))
             }
         }
         return best.values.sorted { $0.score > $1.score }.prefix(5).map { $0.word }
+    }
+
+    /// v0.26: per-language glide index, built ONCE (lazily): the
+    /// deduped skeleton of every dictionary word + buckets of word
+    /// indices by first folded letter.
+    private var skelCacheES: [String]? = nil
+    private var skelCacheEN: [String]? = nil
+    private var bucketCacheES: [Character: [Int]]? = nil
+    private var bucketCacheEN: [Character: [Int]]? = nil
+    private func glideData(for code: String, folded: [String])
+        -> (skel: [String], buckets: [Character: [Int]]) {
+        if code == "en", let s = skelCacheEN, let b = bucketCacheEN { return (s, b) }
+        if code == "es", let s = skelCacheES, let b = bucketCacheES { return (s, b) }
+        var skels: [String] = []
+        skels.reserveCapacity(folded.count)
+        var buckets: [Character: [Int]] = [:]
+        for (i, w) in folded.enumerated() {
+            var out: [Character] = []
+            for ch in w where out.last != ch { out.append(ch) }
+            let skel = String(out)
+            skels.append(skel)
+            if let f = skel.first { buckets[f, default: []].append(i) }
+        }
+        if code == "en" { skelCacheEN = skels; bucketCacheEN = buckets }
+        else { skelCacheES = skels; bucketCacheES = buckets }
+        return (skels, buckets)
     }
 
     private func dedupeFolded(_ w: String) -> String {
