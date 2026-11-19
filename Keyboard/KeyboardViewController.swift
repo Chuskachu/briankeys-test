@@ -1602,18 +1602,25 @@ class KeyboardViewController: UIInputViewController {
 
     /// v0.12: true when two folded words are exactly one edit apart
     /// (insertion, deletion, substitution or transposition).
-    private func editDistanceOne(_ a: String, _ b: String) -> Bool {
+    /// v0.27i: the AOSP price list for ONE edit, in pool points.
+    /// Substitution is cheapest — and HALF price when the wrong
+    /// letter is a physical neighbour of the right one (a graze).
+    /// Then omission, transposition, insertion. nil = not one edit.
+    private func editCostOne(_ a: String, _ b: String) -> Double? {
         let x = Array(a), y = Array(b)
-        if abs(x.count - y.count) > 1 { return false }
+        if abs(x.count - y.count) > 1 { return nil }
         if x.count == y.count {
             var diffs: [Int] = []
             for i in x.indices where x[i] != y[i] { diffs.append(i) }
-            if diffs.count == 1 { return true }
+            if diffs.count == 1 {
+                let i = diffs[0]
+                return (keyNeighbours[x[i]]?.contains(y[i]) ?? false) ? 2.0 : 3.8
+            }
             if diffs.count == 2 {
                 let i = diffs[0], j = diffs[1]
-                return j == i + 1 && x[i] == y[j] && x[j] == y[i]
+                if j == i + 1 && x[i] == y[j] && x[j] == y[i] { return 5.6 }
             }
-            return false
+            return nil
         }
         let (short, long) = x.count < y.count ? (x, y) : (y, x)
         var i = 0, j = 0, skipped = false
@@ -1621,12 +1628,12 @@ class KeyboardViewController: UIInputViewController {
             if short[i] == long[j] {
                 i += 1; j += 1
             } else {
-                if skipped { return false }
+                if skipped { return nil }
                 skipped = true
                 j += 1
             }
         }
-        return true
+        return x.count < y.count ? 4.7 : 7.2   // a is the typed text
     }
 
     /// v0.26 (AOSP audit): physical key neighbours, from the actual
@@ -1652,20 +1659,6 @@ class KeyboardViewController: UIInputViewController {
         return map
     }()
 
-    /// True when a and b differ by exactly one substitution between
-    /// neighbouring keys.
-    private func isNeighbourSub(_ a: String, _ b: String) -> Bool {
-        let x = Array(a), y = Array(b)
-        guard x.count == y.count else { return false }
-        var diff: (Character, Character)? = nil
-        for i in x.indices where x[i] != y[i] {
-            if diff != nil { return false }
-            diff = (x[i], y[i])
-        }
-        guard let (c1, c2) = diff else { return false }
-        return keyNeighbours[c1]?.contains(c2) ?? false
-    }
-
     private func computeSuggestions(for prefix: String) -> [String] {
         if prefix.isEmpty {
             // No word in progress: v0.6 — first, what HIS phrases say
@@ -1684,73 +1677,78 @@ class KeyboardViewController: UIInputViewController {
             return out
         }
         let fp = fold(prefix)
-        var out: [String] = []
-        var seenAt: [String: Int] = [:]
+        // v0.27i (Brian — "no con calma", 2026-11-19): the UNIFIED
+        // SCORER, AOSP style. Every candidate goes into ONE pool and
+        // is priced the same way: frequency, minus the cost of the
+        // evidence against it (letters still to complete; one edit
+        // from editCostOne's price list), plus a bonus when the word
+        // follows his previous word in his own phrases. Pass ORDER
+        // no longer decides the chips — a frequent word one graze
+        // away can finally beat a rare exact-prefix word.
+        var pool: [String: (word: String, score: Double, seq: Int)] = [:]
+        var poolSeq = 0
         func accented(_ s: String) -> Bool {
             s.folding(options: .diacriticInsensitive, locale: nil) != s
         }
-        func offer(_ surface: String) {
+        func addToPool(_ surface: String, _ score: Double) {
             let f = fold(surface)
-            if let idx = seenAt[f] {
-                // v0.9 (Brian): the accented twin wins. His learned
-                // unaccented "mas" used to shadow the dictionary's
-                // "más" — now the form WITH the tilde replaces it.
-                if !accented(out[idx]), accented(surface) { out[idx] = surface }
+            if let cur = pool[f] {
+                if score > cur.score + 0.01 {
+                    pool[f] = (surface, score, cur.seq)
+                } else if score > cur.score - 0.01,
+                          !accented(cur.word), accented(surface) {
+                    // v0.9's rule survives: the accented twin wins.
+                    pool[f] = (surface, max(score, cur.score), cur.seq)
+                }
                 return
             }
-            seenAt[f] = out.count
-            out.append(surface)
+            pool[f] = (surface, score, poolSeq)
+            poolSeq += 1
+        }
+        func freqScore(_ rank: Int, _ total: Int) -> Double {
+            40.0 * (1.0 - Double(rank) / Double(max(1, total)))
+        }
+        let prevFollowers = lastCompletedWord?.lowercased().flatMap { bigrams[$0] }
+        func contextBonus(_ surface: String) -> Double {
+            guard let fol = prevFollowers,
+                  let c = fol[surface] ?? fol[surface.lowercased()] else { return 0 }
+            return min(15.0, Double(c) * 3.0)
         }
         for (i, seed) in seedWords.enumerated() where foldedSeeds[i].hasPrefix(fp) {
-            offer(seed)
-            if out.count == 5 { return out }
+            addToPool(seed, 95 + contextBonus(seed))
         }
         // v0.6: his pinned personal words outrank merely-learned ones.
         for w in personal.sorted { (learned[$0] ?? 0) > (learned[$1] ?? 0) }
         where fold(w).hasPrefix(fp) {
-            offer(w)
-            if out.count == 5 { return out }
+            addToPool(w, 90 + contextBonus(w))
         }
         let learnedMatches = learned
             .filter { (learnedFolded[$0.key] ?? fold($0.key)).hasPrefix(fp) }
             .sorted { $0.value > $1.value }
         for m in learnedMatches {
-            offer(m.key)
-            if out.count == 5 { return out }
+            addToPool(m.key, 55 + min(25.0, Double(m.value) * 2.0) + contextBonus(m.key))
         }
-        // v0.9 (Brian): ONE dictionary — the active language's.
-        // v0.21 (Brian): bilingual mode searches BOTH dictionaries,
-        // interleaved by frequency rank (es, en, es, en...), because
-        // he mixes the two in the same messages. dictWords/dictFolded
-        // stay the PRIMARY list (ES unless English-only) for the
-        // twin and near-word passes below. Word chips cap at FIVE
-        // now — the sixth chip belongs to emojis (see emojiSlot()).
+        // Completions, priced per letter still missing (AOSP: the
+        // first completed letter is the expensive one). An EXACT
+        // folded match — he typed the word itself — gets promoted.
         let dictWords = lang == "en" ? WordLists.en : WordLists.es
         let dictFolded = lang == "en" ? foldedEN : foldedES
-        if lang == "bi" {
-            let esM = WordLists.es.enumerated().filter { foldedES[$0.offset].hasPrefix(fp) }
-            let enM = WordLists.en.enumerated().filter { foldedEN[$0.offset].hasPrefix(fp) }
-            var ei = 0, ni = 0
-            while out.count < 5, ei < esM.count || ni < enM.count {
-                if ei < esM.count { offer(esM[ei].element); ei += 1 }
-                if out.count >= 5 { break }
-                if ni < enM.count { offer(enM[ni].element); ni += 1 }
-            }
-            if out.count == 5 { return out }
-        } else {
-            for (i, w) in dictWords.enumerated() where dictFolded[i].hasPrefix(fp) {
-                offer(w)
-                if out.count == 5 { return out }
+        func addCompletions(_ words: [String], _ folded: [String]) {
+            var added = 0
+            for (i, w) in words.enumerated() where folded[i].hasPrefix(fp) {
+                let extra = folded[i].count - fp.count
+                var s = freqScore(i, words.count) + contextBonus(w)
+                if extra == 0 { s += 12 }
+                else { s -= 4.8 + 0.1 * Double(extra - 1) }
+                addToPool(w, s)
+                added += 1
+                if added >= 80 { break }
             }
         }
-        // v0.19 (Brian): the TILDE TWIN. The frequency dictionary holds
-        // base forms ("agregar") but not conjugated forms with a tilde
-        // ("agregué"), so finishing "agregue" offered NOTHING — his
-        // screenshots showed empty chips. When he has typed what looks
-        // like a complete word (no longer dictionary word starts with
-        // it) ending in a vowel, offer the same word with a tilde on
-        // that last vowel. Offer only, like everything else.
-        if out.count < 5, lang != "en", prefix.count >= 4,
+        addCompletions(dictWords, dictFolded)
+        if lang == "bi" { addCompletions(WordLists.en, foldedEN) }
+        // v0.19's tilde twin, now priced into the pool (plain first).
+        if lang != "en", prefix.count >= 4,
            let last = prefix.lowercased().last,
            "aeiou".contains(last) {
             let longerExists = dictFolded.contains {
@@ -1761,31 +1759,20 @@ class KeyboardViewController: UIInputViewController {
                 let lower = prefix.lowercased()
                 var twin: String? = nil
                 if lower.hasSuffix("ia") {
-                    // -grafía / -logía family: the tilde sits on the i
-                    // (ortografia -> ortografía), not on the final a.
                     twin = String(lower.dropLast(2)) + "ía"
                 } else if lower.hasSuffix("io") {
                     twin = String(lower.dropLast(2)) + "ío"
                 } else if let a = accents[last] {
                     twin = String(lower.dropLast()) + String(a)
                 }
-                // v0.19 (Brian): BOTH forms as chips — grabo AND grabó.
-                // Spanish decides by context, which the keyboard cannot
-                // see, so he picks. Direct appends on purpose: offer()
-                // would fold-dedupe the pair into one. Plain form first.
                 if let twin, twin != lower {
-                    if !out.contains(lower), out.count < 5 { out.append(lower) }
-                    if !out.contains(twin), out.count < 5 { out.append(twin) }
+                    addToPool(lower, 62 + contextBonus(lower))
+                    addToPool(twin, 61.5 + contextBonus(twin))
                 }
             }
         }
-        // v0.19 (Brian: "ponlo de una vez, no lo dejes para la 0.20"):
-        // consult iOS's own spell checker. It knows Spanish orthography
-        // — a missing tilde IS a misspelling to it, so its guesses carry
-        // the correct forms (ortografia -> ortografía, parrafo ->
-        // párrafo) that our frequency list lacks. Guesses fill free
-        // chips as offers, above the raw edit-distance ones below.
-        if out.count < 5, prefix.count >= 3 {
+        // v0.19: iOS's own spell checker, priced in like everyone else.
+        if prefix.count >= 3 {
             if checkerCacheWord != prefix {
                 checkerCacheWord = prefix
                 let ns = prefix as NSString
@@ -1794,44 +1781,31 @@ class KeyboardViewController: UIInputViewController {
                     in: prefix,
                     language: lang == "en" ? "en" : "es") ?? []
             }
-            for g in checkerCache {
-                // !out.contains: the twin pair above bypasses offer()'s
-                // folded dedupe, so a guess could duplicate a chip.
-                if g != prefix, !out.contains(g) { offer(g) }
-                if out.count == 5 { break }
+            for g in checkerCache where g != prefix {
+                addToPool(g, 34 + contextBonus(g))
             }
         }
-        // v0.12 (Brian): near-word OFFERS. Prefix matching alone could
-        // never offer "que" for his "qie" — when the prefix well runs
-        // dry, fill the free chips with words one edit away (folded),
-        // in dictionary order (= frequency), scanning the top 4000.
-        // Offers only: nothing applies without his tap.
-        // v0.26: neighbour substitutions are offered before far ones.
-        if out.count < 5, prefix.count >= 3 {
-            var nearC: [String] = [], farC: [String] = []
+        // Near-words (v0.12), priced by editCostOne instead of order.
+        if prefix.count >= 3 {
             for (i, w) in dictWords.enumerated().prefix(4000)
-            where !dictFolded[i].hasPrefix(fp) && editDistanceOne(fp, dictFolded[i]) && !out.contains(w) {
-                if isNeighbourSub(fp, dictFolded[i]) { nearC.append(w) } else { farC.append(w) }
+            where !dictFolded[i].hasPrefix(fp) {
+                if let cost = editCostOne(fp, dictFolded[i]) {
+                    addToPool(w, freqScore(i, dictWords.count) - cost + contextBonus(w))
+                }
             }
-            for w in nearC + farC {
-                offer(w)
-                if out.count == 5 { break }
-            }
-        }
-        if out.count < 5, lang == "bi", prefix.count >= 3 {
-            var nearC: [String] = [], farC: [String] = []
-            for (i, w) in WordLists.en.enumerated().prefix(4000)
-            where !foldedEN[i].hasPrefix(fp) && editDistanceOne(fp, foldedEN[i]) && !out.contains(w) {
-                if isNeighbourSub(fp, foldedEN[i]) { nearC.append(w) } else { farC.append(w) }
-            }
-            for w in nearC + farC {
-                offer(w)
-                if out.count == 5 { break }
+            if lang == "bi" {
+                for (i, w) in WordLists.en.enumerated().prefix(4000)
+                where !foldedEN[i].hasPrefix(fp) {
+                    if let cost = editCostOne(fp, foldedEN[i]) {
+                        addToPool(w, freqScore(i, WordLists.en.count) - cost + contextBonus(w))
+                    }
+                }
             }
         }
-        // v0.21: the word -> emoji offer no longer lives here — it
-        // moved to emojiSlot(), the dedicated sixth chip.
-        return Array(out.prefix(5))
+        // v0.21: the word -> emoji offer lives in emojiSlot(), chip 6.
+        return pool.values
+            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.seq < $1.seq }
+            .prefix(5).map { $0.word }
     }
 
     /// v0.21 (Brian): the SIXTH chip (bottom-right) belongs to
@@ -2244,7 +2218,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.26i Speed Lab", "")
+        flashBar("MyKeys v0.27i Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
