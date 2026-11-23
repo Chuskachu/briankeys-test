@@ -960,7 +960,10 @@ class KeyboardViewController: UIInputViewController {
 
     private func buildNumbers() {
         mainStack.addArrangedSubview(makeRow("1234567890".map { letterKey(String($0)) }))
-        mainStack.addArrangedSubview(makeRow(["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""].map { punctKey($0) }))
+        // v0.29i (Brian, 2026-11-20): the yen sign sits next to the
+        // dollar on the numbers page too (it also stays on the
+        // symbols page, where it already lived).
+        mainStack.addArrangedSubview(makeRow(["-", "/", ":", ";", "(", ")", "$", "¥", "&", "@", "\""].map { punctKey($0) }))
         var row3: [KeyButton] = [functionKey("#+=", action: #selector(showSymbols))]
         for ch in [".", ",", "?", "!", "'"] { row3.append(punctKey(ch)) }
         let del = functionKey("⌫", action: #selector(deleteTapped))
@@ -2218,7 +2221,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.28i Speed Lab", "")
+        flashBar("MyKeys v0.29i Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2929,14 +2932,26 @@ class KeyboardViewController: UIInputViewController {
     /// whole view on every shift change and auto-shift check, and those
     /// rebuilds swallowed touches while Brian typed fast.
     private func applyShiftVisuals() {
-        for b in letterButtons {
-            guard let base = b.accessibilityLabel else { continue }
-            b.setTitle(shift == .off ? base : base.uppercased(), for: .normal)
-        }
-        shiftButton?.setTitle(shift == .off ? "⇧" : "⇪", for: .normal)
-        if let sb = shiftButton {
-            if shift == .off { paint(sb, normal: functionKeyColor, pressed: functionPressedColor) }
-            else { paint(sb, normal: .systemOrange, pressed: .systemOrange) }
+        // v0.29i flash hypothesis (Brian reopened it 2026-11-23):
+        // the keys are .system UIButtons, and a system button
+        // ANIMATES every title change (fade out / fade in). 26
+        // letters crossfading at once reads as a white flash.
+        // Page swaps never flashed because buildKeyboard() runs
+        // inside performWithoutAnimation — the shift retitle path
+        // never got that treatment. Standard documented cure:
+        // retitle inside performWithoutAnimation + layoutIfNeeded.
+        UIView.performWithoutAnimation {
+            for b in letterButtons {
+                guard let base = b.accessibilityLabel else { continue }
+                b.setTitle(shift == .off ? base : base.uppercased(), for: .normal)
+                b.layoutIfNeeded()
+            }
+            shiftButton?.setTitle(shift == .off ? "⇧" : "⇪", for: .normal)
+            if let sb = shiftButton {
+                if shift == .off { paint(sb, normal: functionKeyColor, pressed: functionPressedColor) }
+                else { paint(sb, normal: .systemOrange, pressed: .systemOrange) }
+                sb.layoutIfNeeded()
+            }
         }
     }
 
