@@ -345,21 +345,32 @@ class KeyboardViewController: UIInputViewController {
     /// Accent-folded forms of the learned words, cached (v0.2 diet).
     private var learnedFolded: [String: String] = [:]
 
-    // MARK: - Corrección prudente (V1.8 — Brian's choice, 2026-11-12)
+    // MARK: - Autocorrector (v0.33i — the standard rebuild)
     //
-    // Registration alone hit a physical wall: Brian's thumb patch covers
-    // two keys, so intent is not in the touch signal. His answer: an
-    // AUTOMATIC corrector, but a prudent one, under HIS rules:
-    // - It only touches words that exist in NEITHER Spanish nor English.
-    // - It acts only when there is exactly ONE plausible candidate.
-    // - His words (seeds, and anything learned twice) are untouchable.
-    // - It ships OFF; he switches it with a long-press on the space bar
-    //   (the switch lives in the keyboard: app↔extension settings need
-    //   App Groups, unproven under SideStore re-signing).
-    // Every fix announces itself with a soft double-tick haptic so he can
-    // FEEL the keyboard act — transparency he can notice, never silent.
+    // Brian's call (2026-11-24): suggestions and autocorrection are
+    // NOT where MyKeys should be original — every market keyboard
+    // does them well, so MyKeys takes the STANDARD model (AOSP's
+    // cost list, ONE engine for chips and corrections, big
+    // dictionaries, an undo chip after every fix) and spends its
+    // originality on customisation instead. The old V1.8 "prudent"
+    // judge — a separate engine with its own distance function and
+    // a tiny candidate pool — was deleted whole; autoFix holds the
+    // rules that replaced it. The switch (Editor -> Corrector) and
+    // its pref key keep their V1.8 names so his setting survives.
     private let prudentKey = "bk_prudent_v1"
     private lazy var prudentEnabled: Bool = settingBool(prudentKey, default: false)
+    // v0.33i: after the corrector changes a word, his original stays
+    // on offer as the first chip (in quotes, like iOS) until he
+    // starts the next word; reverting blacklists the word forever.
+    private var pendingUndo: (original: String, corrected: String)?
+    private let noCorrectKey = "bk_nocorrect_v1"
+    private lazy var noCorrect: Set<String> = Set(wordStore.stringArray(forKey: noCorrectKey) ?? [])
+    private var undoOffer: (original: String, corrected: String)? {
+        guard let u = pendingUndo, localWord.isEmpty, editSuffix.isEmpty,
+              (textDocumentProxy.documentContextBeforeInput ?? "").hasSuffix(u.corrected + " ")
+        else { return nil }
+        return u
+    }
     private lazy var foldedESSet: Set<String> = Set(foldedES)
     private lazy var foldedENSet: Set<String> = Set(foldedEN)
     private lazy var foldedES: [String] = WordLists.es.map { fold($0) }
@@ -1319,8 +1330,8 @@ class KeyboardViewController: UIInputViewController {
         // The Enter key, when on, keeps the right edge.
         if dismissMode == 1 || dismissMode == 2 {
             let hide = functionKey("⌨\u{FE0E}⌄", action: #selector(dismissButtonTapped))
-            hide.titleLabel?.font = .systemFont(ofSize: 15)
-            hide.widthAnchor.constraint(equalToConstant: 34).isActive = true
+            hide.titleLabel?.font = .systemFont(ofSize: 20)
+            hide.widthAnchor.constraint(equalToConstant: 42).isActive = true
             row.addArrangedSubview(hide)
         }
         if enterKeyOn {
@@ -1521,9 +1532,10 @@ class KeyboardViewController: UIInputViewController {
         let w = localWord
         guard w.count >= 2 else { return }
         var final = w
-        if prudentEnabled, let fixed = prudentFix(for: w) {
+        if prudentEnabled, let fixed = autoFix(for: w) {
             replaceCurrentWord(with: fixed)
             final = fixed
+            pendingUndo = (original: w, corrected: fixed)
             // (v0.2: the corrector's old double-tick haptic is gone —
             // haptics are space-only now. The corrector is parked anyway.)
         }
@@ -1531,72 +1543,65 @@ class KeyboardViewController: UIInputViewController {
         noteCompleted(final)   // v0.6: feed the bigram counts
     }
 
-    /// The prudent judge. Returns the ONE acceptable correction for a
-    /// non-word, or nil — nil is its favourite answer.
-    private func prudentFix(for w: String) -> String? {
+    /// v0.33i (Brian's standard rebuild): the autocorrect judge,
+    /// written from zero on the AOSP model — the SAME price list
+    /// and frequency scores the suggestion chips use. Rules:
+    /// 1. A word that EXISTS is never touched: both dictionaries
+    ///    (30k words each since v0.33i), his seeds, his pinned
+    ///    words, anything he has completed twice.
+    /// 2. A word he once reverted via the undo chip is never
+    ///    touched again.
+    /// 3. The fix must be exactly ONE edit away, must not merely
+    ///    extend what he typed (completions are the chips' job),
+    ///    and must WIN CLEARLY — a runner-up within 6 points
+    ///    means the keyboard keeps its hands off.
+    /// 4. A learned word may only supply a fix when a dictionary
+    ///    backs it or he uses it a lot (5+) — trusting a stray
+    ///    learned word is how the old engine turned his "ícono"
+    ///    into "cono" (the 10k list did not even contain "icono",
+    ///    so a real word was judged a typo).
+    private func autoFix(for w: String) -> String? {
         guard w.count >= 4 else { return nil }
         // All-caps words are acronyms and intentions, not typos.
         if w == w.uppercased() { return nil }
         let fw = fold(w)
-        // It must be a NON-WORD in both languages (accents/case folded —
-        // "alegria" IS "alegría" minus effort; the chips offer the accent).
         if foldedESSet.contains(fw) || foldedENSet.contains(fw) { return nil }
-        // His seeds are sacred.
         if foldedSeeds.contains(fw) { return nil }
-        // A learned word he has completed twice is vocabulary, not error.
-        // (Once could be a typo; twice is a choice.)
+        if personal.contains(where: { fold($0) == fw }) { return nil }
         for (surface, count) in learned where count >= 2 && fold(surface) == fw { return nil }
-        // Candidate pool: his words first, then the top of both lists.
-        let budget = w.count >= 7 ? 2 : 1
-        var candidates: [String] = []
-        func consider(_ surface: String, _ foldedForm: String) {
-            let d = osaDistance(fw, foldedForm, maxDist: budget)
-            if d == 0 { candidates.append("\u{0}EXACT") ; return }  // folded-equal = it IS a word
-            if d <= budget { candidates.append(surface) }
+        if noCorrect.contains(fw) { return nil }
+        var scored: [(word: String, score: Double)] = []
+        func consider(_ surface: String, _ base: Double) {
+            let cf = fold(surface)
+            guard cf != fw, !cf.hasPrefix(fw),
+                  let cost = editCostOne(fw, cf) else { return }
+            scored.append((surface, base - cost))
         }
-        for (i, seed) in seedWords.enumerated() { consider(seed, foldedSeeds[i]) }
-        for (surface, _) in learned { consider(surface, fold(surface)) }
-        // v0.9: fixes are drawn from the ACTIVE language only.
-        let pool = lang == "en" ? WordLists.en : WordLists.es
-        let poolFolded = lang == "en" ? foldedEN : foldedES
-        for i in 0..<min(1200, pool.count) { consider(pool[i], poolFolded[i]) }
-        if candidates.contains("\u{0}EXACT") { return nil }
-        // Act only on a UNIQUE candidate — two plausible fixes = no fix.
-        let unique = Array(Set(candidates))
-        guard unique.count == 1, var fixed = unique.first else { return nil }
+        for seed in seedWords { consider(seed, 95) }
+        for p in personal { consider(p, 90) }
+        for (surface, count) in learned {
+            let sf = fold(surface)
+            let backed = foldedESSet.contains(sf) || foldedENSet.contains(sf)
+            guard backed || count >= 5 else { continue }
+            consider(surface, 55 + min(25, Double(2 * count)))
+        }
+        let lists: [[String]] = lang == "en" ? [WordLists.en]
+            : lang == "bi" ? [WordLists.es, WordLists.en]
+            : [WordLists.es]
+        for list in lists {
+            for (rank, word) in list.prefix(6000).enumerated() {
+                consider(word, 40.0 * (1.0 - Double(rank) / Double(list.count)))
+            }
+        }
+        guard let best = scored.max(by: { $0.score < $1.score }) else { return nil }
+        let runnerUp = scored.filter { fold($0.word) != fold(best.word) }.map { $0.score }.max() ?? -1000
+        guard best.score - runnerUp >= 6 else { return nil }
+        var fixed = best.word
         // Keep his capitalisation.
         if let first = w.first, first.isUppercase {
             fixed = fixed.prefix(1).uppercased() + fixed.dropFirst()
         }
         return fixed
-    }
-
-    /// Optimal string alignment distance (Levenshtein + transposition
-    /// counts as ONE edit — "borwn" is one slip away from "brown"),
-    /// with early exit once the distance provably exceeds maxDist.
-    private func osaDistance(_ a: String, _ b: String, maxDist: Int) -> Int {
-        let x = Array(a), y = Array(b)
-        if abs(x.count - y.count) > maxDist { return maxDist + 1 }
-        var prev2: [Int]? = nil
-        var prev = Array(0...y.count)
-        var cur = [Int](repeating: 0, count: y.count + 1)
-        for i in 1...x.count {
-            cur[0] = i
-            var rowMin = cur[0]
-            for j in 1...y.count {
-                let cost = x[i - 1] == y[j - 1] ? 0 : 1
-                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-                if i > 1, j > 1, x[i - 1] == y[j - 2], x[i - 2] == y[j - 1], let p2 = prev2 {
-                    cur[j] = min(cur[j], p2[j - 2] + 1)
-                }
-                rowMin = min(rowMin, cur[j])
-            }
-            if rowMin > maxDist { return maxDist + 1 }
-            prev2 = prev
-            prev = cur
-            cur = [Int](repeating: 0, count: y.count + 1)
-        }
-        return prev[y.count]
     }
 
     private func replaceCurrentWord(with fixed: String) {
@@ -1931,10 +1936,17 @@ class KeyboardViewController: UIInputViewController {
             editSuffix = wordSuffix()
             let target = editSuffix.isEmpty ? localWord : localWord + editSuffix
             currentSuggestions = computeSuggestions(for: target).map { typedCaseForm($0) }
+            if let u = undoOffer {
+                currentSuggestions = Array(([u.original] + currentSuggestions).prefix(5))
+            }
         }
         for (i, chip) in chips.enumerated() {
             if i < currentSuggestions.count {
-                chip.setTitle(displayForm(currentSuggestions[i]), for: .normal)
+                if i == 0, undoOffer != nil {
+                    chip.setTitle("\"\(currentSuggestions[0])\"", for: .normal)
+                } else {
+                    chip.setTitle(displayForm(currentSuggestions[i]), for: .normal)
+                }
                 chip.isEnabled = true
                 chip.alpha = 1
             } else {
@@ -1977,6 +1989,24 @@ class KeyboardViewController: UIInputViewController {
             textDocumentProxy.insertText(" ")
             lastSpaceAt = Date()   // v0.30i: same double-space courtesy as a word chip
             glideInserted = word
+            autoShiftIfNeeded()
+            updateSuggestions()
+            return
+        }
+        // v0.33i: chip 1 right after a correction is the UNDO
+        // offer — his original word, in quotes. One tap swaps the
+        // fix back out and the corrector never touches it again.
+        if i == 0, let u = undoOffer {
+            pendingUndo = nil
+            for _ in 0..<(u.corrected.count + 1) { textDocumentProxy.deleteBackward() }
+            textDocumentProxy.insertText(u.original)
+            learn(u.original)
+            noteCompleted(u.original)
+            noCorrect.insert(fold(u.original))
+            wordStore.set(Array(noCorrect), forKey: noCorrectKey)
+            UserDefaults.standard.set(Array(noCorrect), forKey: noCorrectKey)
+            textDocumentProxy.insertText(" ")
+            lastSpaceAt = Date()
             autoShiftIfNeeded()
             updateSuggestions()
             return
@@ -2309,7 +2339,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.32i Speed Lab", "")
+        flashBar("MyKeys v0.33i Standard", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -3014,7 +3044,7 @@ class KeyboardViewController: UIInputViewController {
             out = (shift == .off) ? text.lowercased() : text.uppercased()
         }
         textDocumentProxy.insertText(out)
-        if out.count == 1, let oc = out.first, oc.isLetter { localWord.append(oc) }
+        if out.count == 1, let oc = out.first, oc.isLetter { localWord.append(oc); pendingUndo = nil }
         if shift == .once, text.count == 1, text.first!.isLetter {
             shift = .off
             applyShiftVisuals()   // update in place — never rebuild mid-typing
@@ -3485,6 +3515,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func deleteTapped() {
+        pendingUndo = nil   // v0.33i
         glideChips = nil; glideInserted = nil   // v0.23
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: base char may be gone
         textDocumentProxy.deleteBackward()
