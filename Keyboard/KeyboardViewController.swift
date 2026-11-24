@@ -303,6 +303,10 @@ class KeyboardViewController: UIInputViewController {
     /// letter path. textDidChange resyncs it when a change comes from
     /// outside (field switch, cursor move, host-app edits).
     private var localWord: String = ""
+    /// v0.30i: letters of the word AFTER the cursor, refreshed by
+    /// updateSuggestions — non-empty only when Brian went back INTO
+    /// a word to fix it.
+    private var editSuffix: String = ""
 
     // MARK: - Suggestion bar (V1.7 — Phase 2, pulled forward by Brian)
     //
@@ -481,6 +485,17 @@ class KeyboardViewController: UIInputViewController {
         // while pages built later (numbers) followed the app. That is
         // Brian's "dark in letters, light in numbers" in BOTH v0.17 and
         // v0.18. Repaint the visible page now that the look is settled.
+        // v0.30i (Brian, 2026-11-23): swipe DOWN to put the keyboard
+        // away — he sometimes opens it by tapping a text box by
+        // accident and it eats half the screen. The pan must START
+        // above the bottom row (space lives there: flick = Enter,
+        // long-press = trackpad) and travel mostly straight down.
+        // cancelsTouchesInView = false, so typing and slide are
+        // never stolen. HYPOTHESIS: resignFirstResponder via
+        // sendAction is the standard hide — Brian verifies.
+        let dismissPan = UIPanGestureRecognizer(target: self, action: #selector(dismissPanMoved(_:)))
+        dismissPan.cancelsTouchesInView = false
+        view.addGestureRecognizer(dismissPan)
         // buildKeyboardNow, NOT buildKeyboard: the snapshot cover is
         // pointless (and possibly a blank flash) before first layout.
         buildKeyboardNow()
@@ -1427,6 +1442,29 @@ class KeyboardViewController: UIInputViewController {
         return word
     }
 
+    /// v0.30i: letters of the same word AFTER the cursor (empty when
+    /// the cursor sits at the word's end, the normal typing case).
+    private func wordSuffix() -> String {
+        let after = textDocumentProxy.documentContextAfterInput ?? ""
+        var word = ""
+        for ch in after {
+            if ch.isLetter { word.append(ch) } else { break }
+        }
+        return word
+    }
+
+    /// v0.30i (Brian): a suggestion wears the case of what he TYPED.
+    /// After a period he starts with a capital, so "Manana" must
+    /// offer "Mañana", not "mañana". His rule: grammar rules, NOT a
+    /// second capitalised dictionary. ALL-CAPS typing -> ALL-CAPS
+    /// offers.
+    private func typedCaseForm(_ w: String) -> String {
+        let t = localWord
+        guard let f = t.first, f.isUppercase else { return w }
+        if t.count >= 2 && t == t.uppercased() { return w.uppercased() }
+        return w.prefix(1).uppercased() + w.dropFirst()
+    }
+
     /// Count a word so the bar learns Brian's vocabulary.
     // v0.26 audit fix: learned/bigram stores used to serialize in
     // full on EVERY completed word. Now: mark dirty, flush at most
@@ -1853,8 +1891,15 @@ class KeyboardViewController: UIInputViewController {
         }
         if let g = glideChips, glideInserted != nil {
             currentSuggestions = Array(g.prefix(5))
+            editSuffix = ""
         } else {
-            currentSuggestions = computeSuggestions(for: localWord)
+            // v0.30i (Brian): cursor INSIDE a word (he went back to
+            // fix it) — judge the WHOLE word, letters after the
+            // cursor included, not just the fresh prefix he is
+            // retyping. And every offer wears the typed case.
+            editSuffix = wordSuffix()
+            let target = editSuffix.isEmpty ? localWord : localWord + editSuffix
+            currentSuggestions = computeSuggestions(for: target).map { typedCaseForm($0) }
         }
         for (i, chip) in chips.enumerated() {
             if i < currentSuggestions.count {
@@ -1899,6 +1944,7 @@ class KeyboardViewController: UIInputViewController {
             learn(word)
             noteCompleted(word)
             textDocumentProxy.insertText(" ")
+            lastSpaceAt = Date()   // v0.30i: same double-space courtesy as a word chip
             glideInserted = word
             autoShiftIfNeeded()
             updateSuggestions()
@@ -1906,7 +1952,17 @@ class KeyboardViewController: UIInputViewController {
         }
         guard i < currentSuggestions.count else { return }
         var word = currentSuggestions[i]
-        for _ in localWord { textDocumentProxy.deleteBackward() }
+        // v0.30i: replacing a word he went back INTO — step over the
+        // letters after the cursor and eat them too, but ONLY when
+        // the step really landed at the word's end (re-read to
+        // check); otherwise fall back to the prefix alone.
+        var deleteCount = localWord.count
+        if !editSuffix.isEmpty {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: editSuffix.count)
+            if currentWord() == localWord + editSuffix { deleteCount += editSuffix.count }
+            editSuffix = ""
+        }
+        for _ in 0..<deleteCount { textDocumentProxy.deleteBackward() }
         localWord = ""
         if shift != .off {
             word = word.prefix(1).uppercased() + word.dropFirst()
@@ -1927,6 +1983,7 @@ class KeyboardViewController: UIInputViewController {
         // punctuation typed next) is already handled: insertTextSmart
         // eats the space before . , ; : ! ? so "palabra!" stays hugged.
         textDocumentProxy.insertText(" ")
+        lastSpaceAt = Date()   // v0.30i: the chip's space is space #1 for double-space -> ". "
         autoShiftIfNeeded()
         updateSuggestions()
     }
@@ -2221,7 +2278,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.29i Speed Lab", "")
+        flashBar("MyKeys v0.30i Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -3316,15 +3373,21 @@ class KeyboardViewController: UIInputViewController {
         // become period + space, and auto-shift capitalises the next word.
         // (The learn call above is a no-op in this branch: the context
         // ends with the first space, so there is no current word.)
-        if let last = lastSpaceAt, now.timeIntervalSince(last) < 0.4,
-           before.hasSuffix(" "), let prev = before.dropLast().last,
-           prev.isLetter || prev.isNumber {
-            textDocumentProxy.deleteBackward()
-            textDocumentProxy.insertText(". ")
-            lastSpaceAt = nil
-            autoShiftIfNeeded()
-            updateSuggestions()
-            return
+        if let last = lastSpaceAt, now.timeIntervalSince(last) < 0.4 {
+            // v0.30i (Brian): count ALL trailing spaces — after a
+            // chip tap there can be two (the chip's + his), and the
+            // old check only looked past ONE space, so the period
+            // never came. Eat them all, then ". ".
+            let trailing = before.reversed().prefix(while: { $0 == " " }).count
+            if trailing > 0, let prev = before.dropLast(trailing).last,
+               prev.isLetter || prev.isNumber {
+                for _ in 0..<trailing { textDocumentProxy.deleteBackward() }
+                textDocumentProxy.insertText(". ")
+                lastSpaceAt = nil
+                autoShiftIfNeeded()
+                updateSuggestions()
+                return
+            }
         }
         textDocumentProxy.insertText(" ")
         lastSpaceAt = now
@@ -3346,6 +3409,22 @@ class KeyboardViewController: UIInputViewController {
             logEvent(k: "SPACE", m: "flick-enter", viewPoint: .zero, frame: nil)
         }
         returnTapped()
+    }
+
+    /// v0.30i: the swipe-down handler (wired in viewDidLoad). Fires
+    /// once per gesture: a long, mostly-vertical downward drag that
+    /// started above the bottom row hides the keyboard.
+    private var dismissStartY: CGFloat = 0
+    @objc private func dismissPanMoved(_ g: UIPanGestureRecognizer) {
+        if g.state == .began { dismissStartY = g.location(in: view).y }
+        guard g.state == .changed else { return }
+        let t = g.translation(in: view)
+        let startedAboveBottomRow = dismissStartY < view.bounds.height - keyRowH - 8
+        if startedAboveBottomRow && t.y > 80 && t.y > 2.2 * abs(t.x) {
+            g.isEnabled = false
+            g.isEnabled = true   // stop this gesture firing twice
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
     }
 
     @objc private func returnTapped() {
