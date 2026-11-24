@@ -284,7 +284,7 @@ class KeyboardViewController: UIInputViewController {
     /// Total keyboard height at the current key size/gaps, anchored on
     /// the known-good 315 at 56pt rows with zero gap.
     // v0.19: +34 — the suggestion bar is now TWO rows (78pt, was 44).
-    private var kbBaseHeight: CGFloat { 349 + (keyRowH - 56) * 4 + keyGap * 3 }
+    private var kbBaseHeight: CGFloat { 373 + (keyRowH - 56) * 4 + keyGap * 3 }
     func settingInt(_ key: String, default def: Int) -> Int {
         if let v = wordStore.object(forKey: key) as? Int { return v }
         if let v = UserDefaults.standard.object(forKey: key) as? Int { return v }
@@ -340,10 +340,21 @@ class KeyboardViewController: UIInputViewController {
                              "pelucha", "Pelusa", "kakachon"]
     private let learnedKey = "bk_learned_v1"
     private lazy var learned: [String: Int] = {
-        wordStore.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
+        let raw = wordStore.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
+        // v0.34i cleanup (Brian): this store is for HIS words.
+        // Out: anything the dictionaries already know in any
+        // surface (common words, tilde-less variants) and one-off
+        // sightings that never graduated.
+        return raw.filter { (w, c) in
+            c >= 2 && !foldedESSet.contains(fold(w)) && !foldedENSet.contains(fold(w))
+        }
     }()
     /// Accent-folded forms of the learned words, cached (v0.2 diet).
     private var learnedFolded: [String: String] = [:]
+    // v0.34i: first sightings of a non-dictionary word wait here;
+    // only a second completion graduates them into `learned`.
+    private let pendingLearnKey = "bk_pending_v1"
+    private lazy var pendingLearn: Set<String> = Set(wordStore.stringArray(forKey: pendingLearnKey) ?? [])
 
     // MARK: - Autocorrector (v0.33i — the standard rebuild)
     //
@@ -448,20 +459,22 @@ class KeyboardViewController: UIInputViewController {
         suggestionBar = UIStackView()
         // v0.19 (Brian): TWO thinner rows of chips instead of one —
         // 6 suggestions instead of 3, so pairs like grabo/grabó fit.
+        // v0.34i (Brian): THREE rows of 30pt — 9 chips, so the
+        // relevant options stop being cut for lack of room.
         suggestionBar.axis = .vertical
         suggestionBar.distribution = .fill
         suggestionBar.spacing = 6
-        suggestionBar.heightAnchor.constraint(equalToConstant: 78).isActive = true
-        let chipRows: [UIStackView] = (0..<2).map { _ in
+        suggestionBar.heightAnchor.constraint(equalToConstant: 102).isActive = true
+        let chipRows: [UIStackView] = (0..<3).map { _ in
             let r = UIStackView()
             r.axis = .horizontal
             r.distribution = .fillEqually
             r.spacing = 6
-            r.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            r.heightAnchor.constraint(equalToConstant: 30).isActive = true
             suggestionBar.addArrangedSubview(r)
             return r
         }
-        chips = (0..<6).map { i in
+        chips = (0..<9).map { i in
             let c = UIButton(type: .system)
             c.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium)
             c.setTitleColor(keyTitleColor, for: .normal)
@@ -1514,8 +1527,35 @@ class KeyboardViewController: UIInputViewController {
 
     private func learn(_ w: String) {
         guard w.count >= 2 else { return }
+        let fw = fold(w)
+        // v0.34i (Brian): this store is for HIS words, not the
+        // dictionary's. A word the dictionaries already know — in
+        // any surface, with or without its tilde — is never
+        // stored: the dictionary covers it, and keeping his
+        // tilde-less surface would teach a misspelling. His
+        // phrases still learn it: noteCompleted feeds the
+        // bigrams on its own path.
+        if foldedESSet.contains(fw) || foldedENSet.contains(fw) { return }
+        if foldedSeeds.contains(fw) { return }
+        if personal.contains(where: { fold($0) == fw }) { return }
+        if learned[w] == nil {
+            // Once could be a typo; twice is a choice. A first
+            // sighting waits in the pending set, and only a
+            // second completion graduates it into the store.
+            if pendingLearn.contains(w) {
+                pendingLearn.remove(w)
+                learned[w] = 2
+                learnedFolded[w] = fw
+                markStoreDirty()
+            } else {
+                pendingLearn.insert(w)
+            }
+            wordStore.set(Array(pendingLearn), forKey: pendingLearnKey)
+            UserDefaults.standard.set(Array(pendingLearn), forKey: pendingLearnKey)
+            return
+        }
         learned[w, default: 0] += 1
-        learnedFolded[w] = fold(w)
+        learnedFolded[w] = fw
         if learned.count > 800 {   // keep the store lean: top 400 survive
             learned = Dictionary(uniqueKeysWithValues:
                 learned.sorted { $0.value > $1.value }.prefix(400).map { ($0.key, $0.value) })
@@ -1732,10 +1772,10 @@ class KeyboardViewController: UIInputViewController {
                let followers = bigrams[prev] {
                 out += followers.sorted { $0.value > $1.value }.prefix(3).map { $0.key }
             }
-            if out.count < 5 {
+            if out.count < 8 {
                 for w in learned.sorted { $0.value > $1.value } where !out.contains(w.key) {
                     out.append(w.key)
-                    if out.count == 5 { break }
+                    if out.count == 8 { break }
                 }
             }
             return out
@@ -1866,10 +1906,38 @@ class KeyboardViewController: UIInputViewController {
                 }
             }
         }
-        // v0.21: the word -> emoji offer lives in emojiSlot(), chip 6.
-        return pool.values
+        // v0.21: the word -> emoji offer lives in emojiSlot(), last chip.
+        let ranked = pool.values
             .sorted { $0.score != $1.score ? $0.score > $1.score : $0.seq < $1.seq }
-            .prefix(5).map { $0.word }
+        // v0.34i (Brian): a winner whose folded twin carries a
+        // tilde in the dictionary shows BOTH surfaces — "esta" and
+        // "está" — instead of the pool's folded key swallowing
+        // one of them; with 8 chips there is room for the pair.
+        var out: [String] = []
+        for e in ranked {
+            out.append(e.word)
+            if let sib = accentSibling(of: e.word), !out.contains(sib) {
+                out.append(sib)
+            }
+            if out.count >= 8 { break }
+        }
+        return Array(out.prefix(8))
+    }
+
+    /// v0.34i: folded form -> its dictionary surfaces, for words
+    /// that live in two surfaces (esta/está, que/qué, si/sí...).
+    private lazy var foldedSiblings: [String: [String]] = {
+        var m: [String: [String]] = [:]
+        for w in WordLists.es + WordLists.en {
+            let f = fold(w)
+            if m[f] == nil { m[f] = [w] }
+            else if !m[f]!.contains(w) { m[f]!.append(w) }
+        }
+        return m
+    }()
+    private func accentSibling(of word: String) -> String? {
+        guard let group = foldedSiblings[fold(word)], group.count > 1 else { return nil }
+        return group.first { $0 != word }
     }
 
     /// v0.21 (Brian): the SIXTH chip (bottom-right) belongs to
@@ -1890,6 +1958,8 @@ class KeyboardViewController: UIInputViewController {
                 }
             }
             if let hit = EmojiData.wordEmoji[fp] { return hit }
+            // v0.34i: the official CLDR names, English + Spanish.
+            if let hit = EmojiData.nameEmoji[fp] { return hit }
         }
         return topEmojis().first ?? "😀"
     }
@@ -1913,7 +1983,7 @@ class KeyboardViewController: UIInputViewController {
             return
         }
         if let g = glideChips, glideInserted != nil {
-            currentSuggestions = Array(g.prefix(5))
+            currentSuggestions = Array(g.prefix(8))
             editSuffix = ""
         } else {
             // v0.31i (Brian's screenshot, 2026-11-24): the mirror
@@ -1937,7 +2007,7 @@ class KeyboardViewController: UIInputViewController {
             let target = editSuffix.isEmpty ? localWord : localWord + editSuffix
             currentSuggestions = computeSuggestions(for: target).map { typedCaseForm($0) }
             if let u = undoOffer {
-                currentSuggestions = Array(([u.original] + currentSuggestions).prefix(5))
+                currentSuggestions = Array(([u.original] + currentSuggestions).prefix(8))
             }
         }
         for (i, chip) in chips.enumerated() {
@@ -1956,7 +2026,7 @@ class KeyboardViewController: UIInputViewController {
             }
         }
         // v0.21: chip 6 (bottom-right) is the emoji slot, always live.
-        let slot = chips[5]
+        let slot = chips[8]
         slot.setTitle(emojiSlot(), for: .normal)
         slot.isEnabled = true
         slot.alpha = 1
@@ -1967,7 +2037,7 @@ class KeyboardViewController: UIInputViewController {
         // v0.21: chip 6 is the emoji slot — it inserts AT the cursor
         // without eating the word he is typing, adds no space, and
         // never learns; it only counts as emoji use.
-        if i == 5 {
+        if i == 8 {
             let e = emojiSlot()
             textDocumentProxy.insertText(e)
             recordEmojiUse(e)
@@ -2086,14 +2156,12 @@ class KeyboardViewController: UIInputViewController {
     /// Every word the keyboard treats as his: pinned first, then
     /// learned by frequency.
     private func allPersonalWords() -> [String] {
-        var set = Set(learned.keys)
-        set.formUnion(personal)
-        return set.sorted { a, b in
-            let pa = personal.contains(a) ? 1 : 0
-            let pb = personal.contains(b) ? 1 : 0
-            if pa != pb { return pa > pb }
-            return (learned[a] ?? 0) > (learned[b] ?? 0)
-        }
+        // v0.34i (Brian): My Words lists ONLY the words he saves
+        // himself — pinned or added by hand (Gorito, Chumaleee,
+        // Muse...). The invisible learning no longer floods it:
+        // this page went from 42 pages of "le, it, and, my" back
+        // to one short list that is actually his.
+        return personal.sorted { $0.lowercased() < $1.lowercased() }
     }
 
     @objc private func wordsPanelTapped() {
@@ -2339,7 +2407,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.33i Standard", "")
+        flashBar("MyKeys v0.34i Mas chips", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -3296,7 +3364,7 @@ class KeyboardViewController: UIInputViewController {
         }
         for w in personal { consider(w, foldedForm: fold(w), freqProb: 0.999) }
         for (w, _) in learned { consider(w, foldedForm: fold(w), freqProb: 0.99) }
-        return best.values.sorted { $0.score > $1.score }.prefix(5).map { $0.word }
+        return best.values.sorted { $0.score > $1.score }.prefix(8).map { $0.word }
     }
 
     /// v0.28i: per-language (first, last) folded-letter buckets —

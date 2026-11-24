@@ -156,7 +156,7 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.33i")
+                        Text("v0.34i")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -191,6 +191,25 @@ struct ContentView: View {
                     } label: {
                         HStack {
                             Text("⚙️ Keyboard options")
+                                .font(.headline)
+                            Spacer()
+                            Text("›")
+                                .font(.title3)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+
+                    // v0.34i (Brian): the emoji names page — how every
+                    // emote is called, in Spanish and English.
+                    NavigationLink {
+                        EmojiNamesView()
+                    } label: {
+                        HStack {
+                            Text("🔤 Emoji names")
                                 .font(.headline)
                             Spacer()
                             Text("›")
