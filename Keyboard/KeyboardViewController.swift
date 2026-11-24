@@ -1895,6 +1895,19 @@ class KeyboardViewController: UIInputViewController {
             currentSuggestions = Array(g.prefix(5))
             editSuffix = ""
         } else {
+            // v0.31i (Brian's screenshot, 2026-11-24): the mirror
+            // localWord is kept by blind append/removeLast and can
+            // desync from the document when he goes back into a
+            // word (his chips were computed for "q" while the field
+            // clearly held "porq"). From now on the DOCUMENT is the
+            // truth at compute time, whatever path led here; a SUGG
+            // log line marks every resync so his touch log shows
+            // exactly what the keyboard saw.
+            let proxyWord = currentWord()
+            if proxyWord != localWord {
+                if logEnabled { logEvent(k: "SUGG", m: "resync \(localWord)->\(proxyWord) suf=\(wordSuffix())", viewPoint: .zero, frame: nil) }
+                localWord = proxyWord
+            }
             // v0.30i (Brian): cursor INSIDE a word (he went back to
             // fix it) — judge the WHOLE word, letters after the
             // cursor included, not just the fresh prefix he is
@@ -2280,7 +2293,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.30i Speed Lab", "")
+        flashBar("MyKeys v0.31i Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
