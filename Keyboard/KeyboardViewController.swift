@@ -212,6 +212,7 @@ class KeyboardViewController: UIInputViewController {
         keyGap = CGFloat(min(6, max(0, settingInt(keyGapKey, default: 0))))
         bordersOn = settingBool(bordersKey, default: true)
         enterKeyOn = settingBool(enterKeyKey, default: false)
+        dismissMode = min(3, max(0, settingInt(dismissKey, default: 0)))
         keyFont = CGFloat(min(30, max(18, settingInt(fontKey, default: 22))))
         themeName = wordStore.string(forKey: themeKey)
             ?? UserDefaults.standard.string(forKey: themeKey) ?? "auto"
@@ -245,6 +246,8 @@ class KeyboardViewController: UIInputViewController {
     private let bordersKey = "bk_borders_v1"
     private let enterKeyKey = "bk_enter_v1"   // v0.26: optional ⏎ key
     private var enterKeyOn = false
+    private let dismissKey = "bk_dismiss_v1"   // v0.32: 0 Flick, 1 Button, 2 Both, 3 Off
+    private var dismissMode = 0
     private let fontKey = "bk_font_v1"
     private let themeKey = "bk_theme_v1"
     private let hapticKey = "bk_haptic_v1"
@@ -265,6 +268,7 @@ class KeyboardViewController: UIInputViewController {
     private var edH: CGFloat = 56, edGap: CGFloat = 0, edBorders = true
     private var edFont: CGFloat = 22, edTheme = "auto", edHaptic = 2
     private var edEnter = false   // v0.26: staged Enter-key option
+    private var edDismiss = 0   // v0.32: staged Hide choice
     private var edLang = "es"   // v0.21: es | en | bi
     private var edChipFont: CGFloat = 17
     /// v0.12 (Brian): the big words editor — a full page like the
@@ -1307,6 +1311,18 @@ class KeyboardViewController: UIInputViewController {
         // v0.26 (Brian): …and now it can COME BACK, as HIS choice —
         // Editor → Enter. The space bar yields its right end to a ⏎
         // key and returns to a normal width; the flick keeps working.
+        // v0.32i (Brian): the hide-the-keyboard BUTTON — his choice
+        // in Editor -> Hide (Flick / Button / Both / Off), because
+        // MyKeys' promise is the most customisable keyboard there
+        // is. Small, at the space bar's right, and deliberately
+        // NOTHING like ⏎: a keyboard glyph with a down chevron.
+        // The Enter key, when on, keeps the right edge.
+        if dismissMode == 1 || dismissMode == 2 {
+            let hide = functionKey("⌨\u{FE0E}⌄", action: #selector(dismissButtonTapped))
+            hide.titleLabel?.font = .systemFont(ofSize: 15)
+            hide.widthAnchor.constraint(equalToConstant: 34).isActive = true
+            row.addArrangedSubview(hide)
+        }
         if enterKeyOn {
             let enter = functionKey("⏎", action: #selector(returnTapped))
             enter.widthAnchor.constraint(equalToConstant: 54).isActive = true
@@ -2293,7 +2309,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.31i Speed Lab", "")
+        flashBar("MyKeys v0.32i Speed Lab", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -2339,6 +2355,7 @@ class KeyboardViewController: UIInputViewController {
         edSugg = suggEnabled; edSlideMode = slideMode
         edH = keyRowH; edGap = keyGap; edBorders = bordersOn
         edEnter = enterKeyOn
+        edDismiss = dismissMode
         edFont = keyFont; edTheme = themeName; edHaptic = spaceHaptic
         edChipFont = chipFont
         edLang = lang
@@ -2468,9 +2485,7 @@ class KeyboardViewController: UIInputViewController {
         sw3.distribution = .fillEqually
         sw3.addArrangedSubview(editorPill("Enter", on: edEnter, action: #selector(edToggleEnter)))
         sw3.addArrangedSubview(editorPill("Borders", on: edBorders, action: #selector(edToggleBorders)))
-        let hint = editorLabel("Preview \u{2193}", size: 13)
-        hint.textAlignment = .center
-        sw3.addArrangedSubview(hint)
+        sw3.addArrangedSubview(editorPill("Hide: \(dismissLabel(edDismiss))", on: edDismiss != 3, action: #selector(edCycleDismiss)))
 
         editorPreview = UIStackView()
         editorPreview!.axis = .horizontal
@@ -2590,6 +2605,10 @@ class KeyboardViewController: UIInputViewController {
     }
     @objc private func edToggleBorders() { edBorders.toggle(); buildKeyboard() }
     @objc private func edToggleEnter() { edEnter.toggle(); buildKeyboard() }
+    private func dismissLabel(_ m: Int) -> String {
+        m == 1 ? "Button" : m == 2 ? "Both" : m == 3 ? "Off" : "Flick"
+    }
+    @objc private func edCycleDismiss() { edDismiss = (edDismiss + 1) % 4; buildKeyboard() }
 
     @objc private func edHeightChanged(_ sender: UISlider) {
         edH = CGFloat(Int(sender.value.rounded()))
@@ -2623,12 +2642,15 @@ class KeyboardViewController: UIInputViewController {
         keyFont = edFont; themeName = edTheme; spaceHaptic = edHaptic
         chipFont = edChipFont
         enterKeyOn = edEnter
+        dismissMode = edDismiss
         lang = edLang
         wordStore.set(edLang, forKey: langKey)
         UserDefaults.standard.set(edLang, forKey: langKey)
         for c in chips { c.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium) }
         wordStore.set(edSlideMode, forKey: slideModeKey)
         UserDefaults.standard.set(edSlideMode, forKey: slideModeKey)
+        wordStore.set(edDismiss, forKey: dismissKey)
+        UserDefaults.standard.set(edDismiss, forKey: dismissKey)
         wordStore.set(edSlideMode != 0, forKey: slidePrefKey)
         UserDefaults.standard.set(edSlideMode != 0, forKey: slidePrefKey)
         // Saved in BOTH of the keyboard's own stores, like the language
@@ -3430,9 +3452,13 @@ class KeyboardViewController: UIInputViewController {
     /// once per gesture: a long, mostly-vertical downward drag that
     /// started above the bottom row hides the keyboard.
     private var dismissStartY: CGFloat = 0
+    /// v0.32i: the little hide button at the space bar's right
+    /// (Editor -> Hide: Button or Both).
+    @objc private func dismissButtonTapped() { dismissKeyboard() }
+
     @objc private func dismissPanMoved(_ g: UIPanGestureRecognizer) {
         if g.state == .began { dismissStartY = g.location(in: view).y }
-        guard g.state == .changed else { return }
+        guard g.state == .changed, dismissMode == 0 || dismissMode == 2 else { return }
         let t = g.translation(in: view)
         let startedAboveBottomRow = dismissStartY < view.bounds.height - keyRowH - 8
         if startedAboveBottomRow && t.y > 80 && t.y > 2.2 * abs(t.x) {

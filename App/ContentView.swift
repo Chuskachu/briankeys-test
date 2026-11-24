@@ -156,7 +156,7 @@ struct ContentView: View {
                             .bold()
                         // v0.4 (Brian): the version sits right of the title so
                         // he can confirm at a glance what is installed.
-                        Text("v0.31i")
+                        Text("v0.32i")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
