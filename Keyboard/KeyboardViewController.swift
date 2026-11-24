@@ -491,8 +491,10 @@ class KeyboardViewController: UIInputViewController {
         // above the bottom row (space lives there: flick = Enter,
         // long-press = trackpad) and travel mostly straight down.
         // cancelsTouchesInView = false, so typing and slide are
-        // never stolen. HYPOTHESIS: resignFirstResponder via
-        // sendAction is the standard hide — Brian verifies.
+        // never stolen. The hide itself is
+        // UIInputViewController.dismissKeyboard() — the first
+        // v0.30i build FAILED because UIApplication.shared is
+        // NS_EXTENSION_UNAVAILABLE inside extensions.
         let dismissPan = UIPanGestureRecognizer(target: self, action: #selector(dismissPanMoved(_:)))
         dismissPan.cancelsTouchesInView = false
         view.addGestureRecognizer(dismissPan)
@@ -3423,7 +3425,7 @@ class KeyboardViewController: UIInputViewController {
         if startedAboveBottomRow && t.y > 80 && t.y > 2.2 * abs(t.x) {
             g.isEnabled = false
             g.isEnabled = true   // stop this gesture firing twice
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            dismissKeyboard()   // UIInputViewController's own API — the extension-safe way
         }
     }
 
