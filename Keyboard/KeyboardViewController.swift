@@ -1923,6 +1923,14 @@ class KeyboardViewController: UIInputViewController {
             if let sib = accentSibling(of: e.word), !out.contains(sib) {
                 out.append(sib)
             }
+            // v0.36i (Brian): English contractions are the same
+            // story as the tildes — the frequency lists are
+            // letters-only, so "don't" can never be a pool word.
+            // Its plain twin is: offer the pair (dont / don't,
+            // im / I'm, cant / can't...) whenever English is on.
+            if lang != "es", let twin = contractionTwin(of: e.word), !out.contains(twin) {
+                out.append(twin)
+            }
             if out.count >= 8 { break }
         }
         return Array(out.prefix(8))
@@ -1942,6 +1950,35 @@ class KeyboardViewController: UIInputViewController {
     private func accentSibling(of word: String) -> String? {
         guard let group = foldedSiblings[fold(word)], group.count > 1 else { return nil }
         return group.first { $0 != word }
+    }
+
+    /// v0.36i: letters-only form -> contraction surface. The
+    /// standard English contractions; the plain form is what the
+    /// dictionary holds, the apostrophe form is what he wants
+    /// to be able to tap.
+    private static let contractions: [String: String] = [
+        "dont": "don't", "cant": "can't", "wont": "won't",
+        "isnt": "isn't", "arent": "aren't", "didnt": "didn't",
+        "doesnt": "doesn't", "couldnt": "couldn't",
+        "wouldnt": "wouldn't", "shouldnt": "shouldn't",
+        "havent": "haven't", "hasnt": "hasn't", "hadnt": "hadn't",
+        "wasnt": "wasn't", "werent": "weren't", "aint": "ain't",
+        "mustnt": "mustn't", "neednt": "needn't",
+        "im": "I'm", "ive": "I've", "ill": "I'll", "id": "I'd",
+        "youre": "you're", "youve": "you've", "youll": "you'll",
+        "youd": "you'd",
+        "hes": "he's", "hell": "he'll",
+        "shes": "she's", "shell": "she'll",
+        "its": "it's", "itll": "it'll",
+        "weve": "we've", "were": "we're", "wed": "we'd",
+        "theyre": "they're", "theyve": "they've",
+        "theyll": "they'll", "theyd": "they'd",
+        "lets": "let's", "thats": "that's", "whats": "what's",
+        "wheres": "where's", "heres": "here's", "theres": "there's",
+        "whos": "who's", "hows": "how's", "whens": "when's",
+    ]
+    private func contractionTwin(of word: String) -> String? {
+        Self.contractions[fold(word)]
     }
 
     /// v0.21 (Brian): the SIXTH chip (bottom-right) belongs to
@@ -2508,7 +2545,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.35i Nombres", "")
+        flashBar("MyKeys v0.36i Nombres", "")
     }
 
     @objc private func popupToggleTapped() {
