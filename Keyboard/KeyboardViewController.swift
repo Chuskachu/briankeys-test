@@ -2140,6 +2140,17 @@ class KeyboardViewController: UIInputViewController {
             if let u = undoOffer {
                 currentSuggestions = Array(([u.original] + currentSuggestions).prefix(8))
             }
+            // v0.38i (Brian): his own word ALWAYS has the first
+            // seat. "rumir" got eight near-words and no quoted
+            // chip to save it with, because the verbatim word
+            // only reached the bar when some source happened to
+            // offer it (Ogawamachi was luck). Now an unknown
+            // typed word leads the bar — in quotes, via the
+            // saveable rendering — and tapping it saves it.
+            if target.count >= 2, !isKnownWord(target),
+               !currentSuggestions.contains(where: { fold($0) == fold(target) }) {
+                currentSuggestions = Array(([target] + currentSuggestions).prefix(8))
+            }
         }
         // v0.37i: the saveable typed word wears quotes, like the
         // undo offer — his signal that tapping it keeps it in
@@ -2587,7 +2598,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.37i Guardar", "")
+        flashBar("MyKeys v0.38i Rumir", "")
     }
 
     @objc private func popupToggleTapped() {
