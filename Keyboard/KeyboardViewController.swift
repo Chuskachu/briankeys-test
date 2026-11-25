@@ -1197,6 +1197,10 @@ class KeyboardViewController: UIInputViewController {
         let abc = functionKey("ABC", action: #selector(showLetters))
         abc.widthAnchor.constraint(equalToConstant: 64).isActive = true
         row.addArrangedSubview(abc)
+        // v0.35i (Brian): search emojis by name, right here.
+        let searchBtn = functionKey("🔍", action: #selector(emojiSearchTapped))
+        searchBtn.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        row.addArrangedSubview(searchBtn)
         let space = KeyButton(type: .system)
         space.setTitle("space", for: .normal)
         space.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
@@ -1964,6 +1968,86 @@ class KeyboardViewController: UIInputViewController {
         return topEmojis().first ?? "😀"
     }
 
+    // MARK: - v0.35i emoji search (Brian): a 🔍 on the emoji page
+    // opens a search over the official names. The letters page
+    // stays up, but keys feed the query; the bar shows the query
+    // on chip 1, up to 7 result emojis, and ✕. A tap on a result
+    // inserts it into the document and closes the search.
+    private var emojiSearchOn = false
+    private var emojiQuery = ""
+    private var emojiResults: [String] = []
+
+    /// emoji -> the folded words that summon it (the name index
+    /// and his curated pairs, inverted), in emoji-page order.
+    private lazy var emojiWords: [(emoji: String, words: [String])] = {
+        var m: [String: [String]] = [:]
+        for (w, e) in EmojiData.nameEmoji { m[e, default: []].append(w) }
+        for (w, e) in EmojiData.wordEmoji where !(m[e]?.contains(w) ?? false) {
+            m[e, default: []].append(w)
+        }
+        return EmojiData.all.compactMap { e in m[e].map { (emoji: e, words: $0) } }
+    }()
+
+    private func computeEmojiResults() -> [String] {
+        let qw = emojiQuery.components(separatedBy: CharacterSet.letters.inverted)
+            .map { fold($0) }.filter { !$0.isEmpty }
+        guard !qw.isEmpty else { return Array(topEmojis().prefix(7)) }
+        var exact: [String] = []
+        var prefixOnly: [String] = []
+        for item in emojiWords {
+            var ok = true
+            var allExact = true
+            for q in qw {
+                if item.words.contains(q) { continue }
+                if item.words.contains(where: { $0.hasPrefix(q) }) { allExact = false; continue }
+                ok = false; break
+            }
+            if ok {
+                if allExact { exact.append(item.emoji) } else { prefixOnly.append(item.emoji) }
+            }
+        }
+        return Array((exact + prefixOnly).prefix(7))
+    }
+
+    private func renderEmojiSearch() {
+        emojiResults = computeEmojiResults()
+        chips[0].setTitle(emojiQuery.isEmpty ? "🔍 busca un emote…" : "🔍 " + emojiQuery, for: .normal)
+        chips[0].isEnabled = true
+        chips[0].alpha = 1
+        for i in 1...7 {
+            let chip = chips[i]
+            if i - 1 < emojiResults.count {
+                chip.setTitle(emojiResults[i - 1], for: .normal)
+                chip.titleLabel?.font = .systemFont(ofSize: 20)
+                chip.isEnabled = true
+                chip.alpha = 1
+            } else {
+                chip.setTitle("", for: .normal)
+                chip.isEnabled = false
+                chip.alpha = 0.35
+            }
+        }
+        chips[8].setTitle("✕", for: .normal)
+        chips[8].isEnabled = true
+        chips[8].alpha = 1
+    }
+
+    @objc private func emojiSearchTapped() {
+        emojiSearchOn = true
+        emojiQuery = ""
+        showLetters()
+        updateSuggestions()
+    }
+
+    private func exitEmojiSearch() {
+        emojiSearchOn = false
+        emojiQuery = ""
+        for chip in chips {
+            chip.titleLabel?.font = .systemFont(ofSize: chipFont, weight: .medium)
+        }
+        updateSuggestions()
+    }
+
     /// v0.9 (Brian): a chip shows the word AS IT WILL BE INSERTED —
     /// capitalised at a sentence start (Shift on), plain mid-sentence.
     private func displayForm(_ w: String) -> String {
@@ -1972,6 +2056,9 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func updateSuggestions() {
+        // v0.35i: while the emoji search is open, the bar is the
+        // search UI — query, results, ✕.
+        if emojiSearchOn { renderEmojiSearch(); return }
         guard suggestionBar != nil else { return }
         guard suggEnabled else {
             currentSuggestions = []
@@ -2034,6 +2121,20 @@ class KeyboardViewController: UIInputViewController {
 
     @objc private func chipTapped(_ sender: UIButton) {
         let i = sender.tag
+        // v0.35i: in emoji search the chips ARE the search UI —
+        // chip 1 (the query) and chip 9 (✕) close it; the middle
+        // chips insert their emoji into the document.
+        if emojiSearchOn {
+            if i == 0 || i == 8 { exitEmojiSearch(); return }
+            let idx = i - 1
+            if idx < emojiResults.count {
+                let e = emojiResults[idx]
+                textDocumentProxy.insertText(e)
+                recordEmojiUse(e)
+                exitEmojiSearch()
+            }
+            return
+        }
         // v0.21: chip 6 is the emoji slot — it inserts AT the cursor
         // without eating the word he is typing, adds no space, and
         // never learns; it only counts as emoji use.
@@ -2139,7 +2240,7 @@ class KeyboardViewController: UIInputViewController {
 
     /// Long-press on a suggestion chip: pin the word as personal.
     @objc private func chipLongPressed(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began,
+        guard !emojiSearchOn, gesture.state == .began,
               let chip = gesture.view as? UIButton,
               chip.tag < currentSuggestions.count else { return }
         let word = currentSuggestions[chip.tag]
@@ -2407,7 +2508,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.34i Mas chips", "")
+        flashBar("MyKeys v0.35i Nombres", "")
     }
 
     @objc private func popupToggleTapped() {
@@ -3091,6 +3192,13 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Actions
 
     private func insertTextSmart(_ text: String) {
+        // v0.35i: while the emoji search is open, keys feed the
+        // search box, not the document.
+        if emojiSearchOn {
+            emojiQuery += text
+            updateSuggestions()
+            return
+        }
         if text.count == 1, let c = text.first, !c.isLetter, c != " " {
             completeWord()   // a punctuation mark completes a word
             localWord = ""
@@ -3150,6 +3258,11 @@ class KeyboardViewController: UIInputViewController {
     @objc private func letterTouchedDown(_ sender: KeyButton) {
         glideChips = nil; glideInserted = nil
         guard let label = sender.accessibilityLabel ?? sender.title(for: .normal) else { return }
+        if emojiSearchOn {
+            emojiQuery += label
+            updateSuggestions()
+            return
+        }
         insertTextSmart(label)
         pendingVariantKey = sender   // a long-press variant may replace this char
         pendingBaseChar = localWord.last.map { String($0) }
@@ -3208,6 +3321,7 @@ class KeyboardViewController: UIInputViewController {
         let base = glideBaseCount
         let pts = glidePoints
         glidePath = []; glideCrossings = 0; glideBaseCount = 0; glidePoints = []
+        if emojiSearchOn { return }   // v0.35i: no gliding into a search
         guard slideMode == 2 else { return }
         guard variantStrip == nil || variantStrip.isHidden else { return }
         guard crossings >= 1, path.count >= 2 else { return }
@@ -3498,6 +3612,11 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func spaceTapped() {
+        if emojiSearchOn {
+            emojiQuery += " "
+            updateSuggestions()
+            return
+        }
         glideChips = nil; glideInserted = nil   // v0.23: a fresh space ends the glide offer
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: word boundary
         completeWord()   // the word before this space is complete
@@ -3567,6 +3686,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func returnTapped() {
+        if emojiSearchOn { exitEmojiSearch(); return }   // v0.35i
         glideChips = nil; glideInserted = nil   // v0.23
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4
         completeWord()
@@ -3583,6 +3703,11 @@ class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func deleteTapped() {
+        if emojiSearchOn {
+            if !emojiQuery.isEmpty { emojiQuery.removeLast() }
+            updateSuggestions()
+            return
+        }
         pendingUndo = nil   // v0.33i
         glideChips = nil; glideInserted = nil   // v0.23
         pendingVariantKey = nil; pendingBaseChar = nil   // v0.4: base char may be gone

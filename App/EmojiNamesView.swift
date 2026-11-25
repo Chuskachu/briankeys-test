@@ -13,11 +13,13 @@ struct EmojiNamesView: View {
         s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
     }
 
-    private var rows: [(emoji: String, es: String, en: String)] {
+    private var rows: [(emoji: String, es: String, en: String, triggers: String)] {
         let all = EmojiNameData.all
         let q = fold(query.trimmingCharacters(in: .whitespaces))
         guard !q.isEmpty else { return all }
-        return all.filter { fold($0.es).contains(q) || fold($0.en).contains(q) }
+        return all.filter {
+            fold($0.es).contains(q) || fold($0.en).contains(q) || fold($0.triggers).contains(q)
+        }
     }
 
     var body: some View {
@@ -31,6 +33,13 @@ struct EmojiNamesView: View {
                     if !row.en.isEmpty && row.en != row.es {
                         Text(row.en)
                             .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    // v0.35i (Brian): the shortcut — the word(s)
+                    // that summon this emoji while he types.
+                    if !row.triggers.isEmpty {
+                        Text("⌨️ escribe: \(row.triggers)")
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
