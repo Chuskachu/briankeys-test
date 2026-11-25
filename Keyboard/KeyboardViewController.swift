@@ -227,7 +227,18 @@ class KeyboardViewController: UIInputViewController {
     /// v0.6 (Brian): next-word prediction from HIS phrases — counts of
     /// (previous word → next word), learned when a word is completed.
     private let bigramKey = "bk_bigrams_v1"
-    private lazy var bigrams: [String: [String: Int]] = wordStore.dictionary(forKey: bigramKey) as? [String: [String: Int]] ?? [:]
+    private lazy var bigrams: [String: [String: Int]] = {
+        let raw = wordStore.dictionary(forKey: bigramKey) as? [String: [String: Int]] ?? [:]
+        // v0.37i purge: pairs learned automatically under the old
+        // rules go out with them — a pair survives only when BOTH
+        // words are known (dictionary, seed, or saved by him).
+        var out: [String: [String: Int]] = [:]
+        for (prev, followers) in raw where isKnownWord(prev) {
+            let kept = followers.filter { isKnownWord($0.key) }
+            if !kept.isEmpty { out[prev] = kept }
+        }
+        return out
+    }()
     private var lastCompletedWord: String? = nil
     /// v0.9 (Brian): ONE active language — the bilingual bar confused
     /// him the same way Apple's did ("over" offered before "ocurre").
@@ -341,20 +352,20 @@ class KeyboardViewController: UIInputViewController {
     private let learnedKey = "bk_learned_v1"
     private lazy var learned: [String: Int] = {
         let raw = wordStore.dictionary(forKey: learnedKey) as? [String: Int] ?? [:]
-        // v0.34i cleanup (Brian): this store is for HIS words.
-        // Out: anything the dictionaries already know in any
-        // surface (common words, tilde-less variants) and one-off
-        // sightings that never graduated.
-        return raw.filter { (w, c) in
-            c >= 2 && !foldedESSet.contains(fold(w)) && !foldedENSet.contains(fold(w))
+        // v0.37i purge (Brian): automatic learning is gone, and
+        // what it had stored goes with it. A word no dictionary
+        // knows may live ONLY in My Words, put there by his tap —
+        // so this store keeps nothing but dictionary words (in
+        // practice it empties: since v0.34i it held only the
+        // auto-learned ones, Chichibu and friends included).
+        return raw.filter { (w, _) in
+            foldedESSet.contains(fold(w)) || foldedENSet.contains(fold(w))
         }
     }()
     /// Accent-folded forms of the learned words, cached (v0.2 diet).
     private var learnedFolded: [String: String] = [:]
-    // v0.34i: first sightings of a non-dictionary word wait here;
-    // only a second completion graduates them into `learned`.
-    private let pendingLearnKey = "bk_pending_v1"
-    private lazy var pendingLearn: Set<String> = Set(wordStore.stringArray(forKey: pendingLearnKey) ?? [])
+    // (v0.34i's pending-graduation set died in v0.37i, with the
+    // automatic learning it served.)
 
     // MARK: - Autocorrector (v0.33i — the standard rebuild)
     //
@@ -1530,42 +1541,26 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func learn(_ w: String) {
-        guard w.count >= 2 else { return }
-        let fw = fold(w)
-        // v0.34i (Brian): this store is for HIS words, not the
-        // dictionary's. A word the dictionaries already know — in
-        // any surface, with or without its tilde — is never
-        // stored: the dictionary covers it, and keeping his
-        // tilde-less surface would teach a misspelling. His
-        // phrases still learn it: noteCompleted feeds the
-        // bigrams on its own path.
-        if foldedESSet.contains(fw) || foldedENSet.contains(fw) { return }
-        if foldedSeeds.contains(fw) { return }
-        if personal.contains(where: { fold($0) == fw }) { return }
-        if learned[w] == nil {
-            // Once could be a typo; twice is a choice. A first
-            // sighting waits in the pending set, and only a
-            // second completion graduates it into the store.
-            if pendingLearn.contains(w) {
-                pendingLearn.remove(w)
-                learned[w] = 2
-                learnedFolded[w] = fw
-                markStoreDirty()
-            } else {
-                pendingLearn.insert(w)
-            }
-            wordStore.set(Array(pendingLearn), forKey: pendingLearnKey)
-            UserDefaults.standard.set(Array(pendingLearn), forKey: pendingLearnKey)
-            return
-        }
-        learned[w, default: 0] += 1
-        learnedFolded[w] = fw
-        if learned.count > 800 {   // keep the store lean: top 400 survive
-            learned = Dictionary(uniqueKeysWithValues:
-                learned.sorted { $0.value > $1.value }.prefix(400).map { ($0.key, $0.value) })
-            learnedFolded = Dictionary(uniqueKeysWithValues: learned.keys.map { ($0, fold($0)) })
-        }
-        markStoreDirty()
+        // v0.37i (Brian): automatic word learning is GONE. Until
+        // now the keyboard quietly stored words no dictionary
+        // knows once it had seen them twice — and a typo repeated
+        // a few times looks exactly like a new word, so junk
+        // could settle in as if it were his. His rule from here:
+        // a word the dictionaries do not know enters ONLY
+        // through his deliberate tap on its quoted chip, into
+        // My Words; dictionary words need no learning, the
+        // dictionary already has them. This hook stays for the
+        // call sites and intentionally stores nothing.
+    }
+
+    /// v0.37i: a word the keyboard may remember on its own —
+    /// it is in a dictionary, in the seeds, or in My Words
+    /// because HE put it there.
+    private func isKnownWord(_ w: String) -> Bool {
+        let f = fold(w)
+        return foldedESSet.contains(f) || foldedENSet.contains(f)
+            || foldedSeeds.contains(f)
+            || personal.contains(where: { fold($0) == f })
     }
 
     /// A word was just completed (space / punctuation / return): first
@@ -1981,6 +1976,18 @@ class KeyboardViewController: UIInputViewController {
         Self.contractions[fold(word)]
     }
 
+    /// v0.37i (Brian): the word on the chip is the very word he
+    /// typed, and NEITHER dictionary knows it — a name, a place,
+    /// his own word (his case: "Chichibu", typed at work, tapped
+    /// on its lone chip, and NOT saved). Tapping that chip saves
+    /// it to My Words, the way tapping the quoted word on other
+    /// keyboards adds it to the user dictionary.
+    private func isSaveable(_ word: String, typed: String) -> Bool {
+        let f = fold(word)
+        guard f.count >= 2, f == fold(typed) else { return false }
+        return !foldedESSet.contains(f) && !foldedENSet.contains(f)
+    }
+
     /// v0.21 (Brian): the SIXTH chip (bottom-right) belongs to
     /// emojis alone — the word->emoji match for what he is typing
     /// (two-word pair first, then the single word; the bilingual
@@ -2134,10 +2141,18 @@ class KeyboardViewController: UIInputViewController {
                 currentSuggestions = Array(([u.original] + currentSuggestions).prefix(8))
             }
         }
+        // v0.37i: the saveable typed word wears quotes, like the
+        // undo offer — his signal that tapping it keeps it in
+        // My Words.
+        let saveTarget = localWord + editSuffix
+        let saveableIdx = (glideInserted == nil && undoOffer == nil && !saveTarget.isEmpty)
+            ? currentSuggestions.firstIndex { isSaveable($0, typed: saveTarget) } : nil
         for (i, chip) in chips.enumerated() {
             if i < currentSuggestions.count {
                 if i == 0, undoOffer != nil {
                     chip.setTitle("\"\(currentSuggestions[0])\"", for: .normal)
+                } else if i == saveableIdx {
+                    chip.setTitle("\"\(currentSuggestions[i])\"", for: .normal)
                 } else {
                     chip.setTitle(displayForm(currentSuggestions[i]), for: .normal)
                 }
@@ -2220,6 +2235,11 @@ class KeyboardViewController: UIInputViewController {
             return
         }
         guard i < currentSuggestions.count else { return }
+        // v0.37i (Brian): if the chip he taps IS the word he
+        // typed (and no dictionary knows it), the tap also saves
+        // it to My Words — see isSaveable.
+        let saveable = isSaveable(currentSuggestions[i], typed: localWord + editSuffix)
+        var savedWord: String? = nil
         var word = currentSuggestions[i]
         // v0.30i: replacing a word he went back INTO — step over the
         // letters after the cursor and eat them too, but ONLY when
@@ -2246,6 +2266,15 @@ class KeyboardViewController: UIInputViewController {
         } else {
             learn(word)
             noteCompleted(word)   // v0.6: a tapped chip also completes a word
+            // v0.37i: his tap on his own unknown word saves it to
+            // My Words (personal), so it is suggested from the
+            // first letters next time, like Gorito or Chumaleee.
+            if saveable && !personal.contains(word) {
+                personal.insert(word)
+                wordStore.set(Array(personal), forKey: personalKey)
+                savedWord = word
+                if logEnabled { logEvent(k: "CFG", m: "tap-save \(word)", viewPoint: .zero, frame: nil) }
+            }
         }
         // v0.19 (Brian): the trailing space is BACK — he asked for the
         // old pattern again. The v0.7 objection (a space before the
@@ -2255,6 +2284,15 @@ class KeyboardViewController: UIInputViewController {
         lastSpaceAt = Date()   // v0.30i: the chip's space is space #1 for double-space -> ". "
         autoShiftIfNeeded()
         updateSuggestions()
+        // v0.37i: a saved word flashes its 📌, like a pin, so he
+        // SEES the tap kept it.
+        if let sw = savedWord {
+            chips[0].setTitle("📌 " + sw, for: .normal)
+            NSObject.cancelPreviousPerformRequests(withTarget: self,
+                                                   selector: #selector(refreshBar),
+                                                   object: nil)
+            perform(#selector(refreshBar), with: nil, afterDelay: 1.0)
+        }
     }
 
     // MARK: - v0.6: bigrams, personal dictionary, words manager
@@ -2263,7 +2301,11 @@ class KeyboardViewController: UIInputViewController {
     /// bar can predict HIS next word, and remember it as the previous.
     private func noteCompleted(_ word: String) {
         if let prev = lastCompletedWord?.lowercased(), !prev.isEmpty,
-           prev != word.lowercased() {
+           prev != word.lowercased(),
+           // v0.37i (Brian): pairs are learned only when BOTH
+           // words are known. An unknown word is never remembered
+           // on its own — it enters through his tap, or not at all.
+           isKnownWord(prev), isKnownWord(word) {
             var followers = bigrams[prev] ?? [:]
             followers[word, default: 0] += 1
             bigrams[prev] = followers
@@ -2545,7 +2587,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.36i Nombres", "")
+        flashBar("MyKeys v0.37i Guardar", "")
     }
 
     @objc private func popupToggleTapped() {
