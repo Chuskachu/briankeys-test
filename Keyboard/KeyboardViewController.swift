@@ -2264,7 +2264,14 @@ class KeyboardViewController: UIInputViewController {
         }
         for _ in 0..<deleteCount { textDocumentProxy.deleteBackward() }
         localWord = ""
-        if shift != .off {
+        // v0.39i (Brian): the quoted word is VERBATIM — what he
+        // typed is what gets inserted and saved. v0.38i turned
+        // his lowercase "rumir" into "Rumir" because this shift
+        // re-case ran on it (shift was pending at the tap) —
+        // mid-sentence that is even grammatically wrong, his
+        // words. Normal chips keep the re-case; his own word
+        // never gets it.
+        if !saveable, shift != .off {
             word = word.prefix(1).uppercased() + word.dropFirst()
             if shift == .once { shift = .off; applyShiftVisuals() }
         }
@@ -2598,7 +2605,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.38i Rumir", "")
+        flashBar("MyKeys v0.39i Exacta", "")
     }
 
     @objc private func popupToggleTapped() {
