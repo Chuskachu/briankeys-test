@@ -1998,23 +1998,38 @@ class KeyboardViewController: UIInputViewController {
     /// (two-word pair first, then the single word; the bilingual
     /// map, consulted in both languages as always), or, when
     /// nothing matches, his most-used emoji.
-    private func emojiSlot() -> String {
+    private func emojiSlot() -> String { emojiOffer().emoji }
+
+    /// v0.41i (Brian): the emoji offer plus how many characters
+    /// it REPLACES. When the emoji comes from his word — the
+    /// curated pair, a two-word pair, or the official names —
+    /// tapping it swaps the word for the emoji: he typed
+    /// "smile", tapped the face and got "Smile😀", word AND
+    /// emoji side by side, which makes no sense (his words).
+    /// The fallback emoji (his most-used) is not tied to any
+    /// word, so it replaces nothing and just inserts, as
+    /// before. Mid-word (a suffix after the cursor) never
+    /// replaces either — the match is only the typed prefix.
+    private func emojiOffer() -> (emoji: String, replace: Int) {
         let prefix = localWord
-        if !prefix.isEmpty {
+        if !prefix.isEmpty, wordSuffix().isEmpty {
             let fp = fold(prefix)
             if let ctx = textDocumentProxy.documentContextBeforeInput,
                ctx.count > prefix.count {
                 let before = String(ctx.dropLast(prefix.count))
                 if let prev = before.split(separator: " ").last,
                    let hit = EmojiData.wordEmoji[fold(String(prev)) + " " + fp] {
-                    return hit
+                    // The pair suggested it: both words go.
+                    let tail = String(prev) + " " + prefix
+                    if ctx.hasSuffix(tail) { return (hit, tail.count) }
+                    return (hit, prefix.count)
                 }
             }
-            if let hit = EmojiData.wordEmoji[fp] { return hit }
+            if let hit = EmojiData.wordEmoji[fp] { return (hit, prefix.count) }
             // v0.34i: the official CLDR names, English + Spanish.
-            if let hit = EmojiData.nameEmoji[fp] { return hit }
+            if let hit = EmojiData.nameEmoji[fp] { return (hit, prefix.count) }
         }
-        return topEmojis().first ?? "😀"
+        return (topEmojis().first ?? "😀", 0)
     }
 
     // MARK: - v0.35i emoji search (Brian): a 🔍 on the emoji page
@@ -2203,13 +2218,19 @@ class KeyboardViewController: UIInputViewController {
             }
             return
         }
-        // v0.21: chip 6 is the emoji slot — it inserts AT the cursor
-        // without eating the word he is typing, adds no space, and
-        // never learns; it only counts as emoji use.
+        // v0.21: chip 9 is the emoji slot. v0.41i (Brian): when
+        // the emoji is his word's own emoji, the tap REPLACES
+        // the word (deletes it, inserts the emoji, no space);
+        // the fallback emoji just inserts at the cursor, as
+        // before. It never learns; it only counts as emoji use.
         if i == 8 {
-            let e = emojiSlot()
-            textDocumentProxy.insertText(e)
-            recordEmojiUse(e)
+            let offer = emojiOffer()
+            if offer.replace > 0 {
+                for _ in 0..<offer.replace { textDocumentProxy.deleteBackward() }
+                localWord = ""
+            }
+            textDocumentProxy.insertText(offer.emoji)
+            recordEmojiUse(offer.emoji)
             updateSuggestions()
             return
         }
@@ -2610,7 +2631,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.40i Guardada", "")
+        flashBar("MyKeys v0.41i Reemplaza", "")
     }
 
     @objc private func popupToggleTapped() {
