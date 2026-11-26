@@ -1985,6 +1985,11 @@ class KeyboardViewController: UIInputViewController {
     private func isSaveable(_ word: String, typed: String) -> Bool {
         let f = fold(word)
         guard f.count >= 2, f == fold(typed) else { return false }
+        // v0.40i (Brian): a word already in My Words is NOT
+        // saveable — the quotes mean "tap to save me", and
+        // showing them for a word he already saved (his rumir,
+        // saved and still quoted) makes it look unsaved.
+        if personal.contains(where: { fold($0) == f }) { return false }
         return !foldedESSet.contains(f) && !foldedENSet.contains(f)
     }
 
@@ -2605,7 +2610,7 @@ class KeyboardViewController: UIInputViewController {
         panelStrip.isHidden = true
         variantStrip.isHidden = false
         heightConstraint.constant = kbBaseHeight + 47
-        flashBar("MyKeys v0.39i Exacta", "")
+        flashBar("MyKeys v0.40i Guardada", "")
     }
 
     @objc private func popupToggleTapped() {
